@@ -7,6 +7,7 @@ import pandas as pd
 from ..engine.strategy_reference_v18 import run_close_reference, compare_to_golden
 from ..models import ScanRun, DailyBar
 from .repository import load_all_frames, replace_signals, latest_trade_date
+from .data_update import scan_readiness
 from ..config import settings
 from sqlalchemy import select, func
 
@@ -34,10 +35,18 @@ def _attach_exit_dates(sig: pd.DataFrame, frames: dict[str, pd.DataFrame]) -> pd
     return z
 
 
-def run_full_scan(db):
+def run_full_scan(db, force: bool = False):
     run = ScanRun(status="running", data_date=latest_trade_date(db))
     db.add(run); db.commit(); db.refresh(run)
     try:
+        if not force:
+            ready = scan_readiness(db, check_calendar=True)
+            if not ready["scan_ready"]:
+                run.status = "blocked"
+                run.message = "数据完整性门：" + ready["scan_block_reason"]
+                run.finished_at = datetime.utcnow()
+                db.commit()
+                return pd.DataFrame(), {}, {"blocked": True, "reason": ready["scan_block_reason"]}
         latest = latest_trade_date(db)
         cutoff = latest - timedelta(days=settings.live_scan_calendar_days) if latest else None
         frames = load_all_frames(db, start_date=cutoff)

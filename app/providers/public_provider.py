@@ -14,6 +14,12 @@ from .base import DataProvider
 _FIELDS = "date,code,open,high,low,close,preclose,volume,amount,adjustflag,turn,tradestatus,pctChg,isST"
 _BS_LOCK = threading.RLock()
 _SH = ZoneInfo("Asia/Shanghai")
+_EOD_SNAPSHOT_CUTOFF = time(16, 10)
+
+
+class DailySnapshotNotReady(RuntimeError):
+    """Raised when an all-market spot snapshot is not safe to persist as a daily bar."""
+
 
 
 def _eligible_code(code: str) -> bool:
@@ -182,11 +188,35 @@ class PublicDataProvider(DataProvider):
             raise RuntimeError("cannot resolve latest completed A-share trading day")
         return max(days)
 
-    def daily_snapshot(self, trade_date: date | None = None) -> pd.DataFrame:
-        target = trade_date or self.latest_completed_trade_date()
-        latest_complete = self.latest_completed_trade_date()
-        if target != latest_complete:
-            raise ValueError("bulk snapshot is only valid for the latest completed trading day")
+    def snapshot_trade_date(self, now: datetime | None = None) -> date:
+        """Return the *current* trading date only when a spot snapshot is safe to persist.
+
+        AKShare ``stock_zh_a_spot_em`` has no authoritative trade-date column. Therefore
+        it must never be relabeled as yesterday's bar. We only accept it on an actual
+        A-share trading day and after a conservative Shanghai-time close cutoff.
+        """
+        now = now or datetime.now(_SH)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=_SH)
+        else:
+            now = now.astimezone(_SH)
+
+        today = now.date()
+        trading_today = today in set(self.trade_dates(today, today))
+        if not trading_today:
+            raise DailySnapshotNotReady(f"{today} 不是A股交易日；实时快照不会写入历史日线")
+        if now.time() < _EOD_SNAPSHOT_CUTOFF:
+            raise DailySnapshotNotReady(
+                f"北京时间 {_EOD_SNAPSHOT_CUTOFF.strftime('%H:%M')} 前禁止写入当日日线；当前 {now.strftime('%H:%M:%S')}"
+            )
+        return today
+
+    def daily_snapshot(self, trade_date: date | None = None, now: datetime | None = None) -> pd.DataFrame:
+        target = self.snapshot_trade_date(now)
+        if trade_date is not None and trade_date != target:
+            raise DailySnapshotNotReady(
+                "AKShare 全市场实时快照只能写入当前交易日收盘数据，不能用于补写历史日期"
+            )
 
         x = ak.stock_zh_a_spot_em().copy()
         x = x.rename(columns={

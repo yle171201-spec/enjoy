@@ -2,6 +2,11 @@
 {% block title %}复现校验{% endblock %}
 {% block content %}
 <div class="section-head"><div><span class="eyebrow">GOLDEN REGRESSION</span><h1>V18 逐笔复现</h1><p>通过标准不是“收益差不多”，而是 A78 / B61 / C59 / Combined198 且 Missing=0、Extra=0。</p></div></div>
+
+{% if ready and not ready.scan_ready %}
+<section class="note"><b>当前禁止正式扫描：</b><span class="warn-text">{{ ready.scan_block_reason }}</span><br>这是数据完整性保护，不是策略失败。</section>
+{% endif %}
+
 {% if run %}<div class="metrics"><div><span>A</span><b>{{run.a_count}}</b></div><div><span>B</span><b>{{run.b_count}}</b></div><div><span>C</span><b>{{run.c_count}}</b></div><div><span>合计</span><b>{{run.combined_count}}</b></div><div><span>Matched</span><b>{{run.golden_matched if run.golden_matched is not none else '-'}}</b></div><div><span>Missing</span><b class="{{'ok' if run.golden_missing==0 else 'neg'}}">{{run.golden_missing if run.golden_missing is not none else '-'}}</b></div><div><span>Extra</span><b class="{{'ok' if run.golden_extra==0 else 'neg'}}">{{run.golden_extra if run.golden_extra is not none else '-'}}</b></div></div><pre>{{run.message}}</pre>{% else %}<div class="empty">尚未运行完整扫描。</div>{% endif %}
-<form method="post" action="/admin/scan"><button class="danger-btn">运行完整V18扫描（全市场可能耗时）</button></form>
+<form method="post" action="/admin/scan"><button class="danger-btn" {% if ready and not ready.scan_ready %}disabled title="历史数据完整性门尚未通过"{% endif %}>运行完整V18扫描（全市场可能耗时）</button></form>
 {% endblock %}

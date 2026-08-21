@@ -18,10 +18,10 @@ from .services.repository import latest_trade_date, latest_prices
 from .services.strategy_service import run_full_scan
 from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.chart_service import build_stock_chart
-from .services.data_update import data_stats, bootstrap_batch, sync_daily_public
+from .services.data_update import data_stats, bootstrap_batch, sync_daily_public, scan_readiness
 
 BASE = Path(__file__).resolve().parent
-app = FastAPI(title=settings.app_name, version="2.0")
+app = FastAPI(title=settings.app_name, version=settings.web_version)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=BASE / "templates")
 
@@ -37,8 +37,9 @@ def _bg_bootstrap(limit: int):
 def _bg_daily_and_scan():
     db = SessionLocal()
     try:
-        sync_daily_public(db)
-        run_full_scan(db)
+        update = sync_daily_public(db)
+        if update.get("status") == "ok":
+            run_full_scan(db)  # integrity gate inside run_full_scan blocks partial-universe scans
     finally:
         db.close()
 
@@ -58,7 +59,7 @@ async def auth_middleware(request, call_next):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": "V2", "strategy": "V18"}
+    return {"ok": True, "version": settings.web_version, "strategy": settings.strategy_version}
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -294,7 +295,8 @@ def admin_daily_update(background_tasks: BackgroundTasks):
 @app.get("/validation", response_class=HTMLResponse)
 def validation(request: Request, db=Depends(db_session)):
     run = db.execute(select(ScanRun).order_by(ScanRun.id.desc()).limit(1)).scalar_one_or_none()
-    return templates.TemplateResponse("validation.html", {"request": request, "run": run})
+    ready = scan_readiness(db, check_calendar=True)
+    return templates.TemplateResponse("validation.html", {"request": request, "run": run, "ready": ready})
 
 
 @app.post("/admin/scan")

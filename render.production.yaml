@@ -33,6 +33,14 @@ services:
         value: "200"
       - key: LIVE_SCAN_CALENDAR_DAYS
         value: "720"
+      - key: MIN_SCAN_BOOTSTRAP_COVERAGE
+        value: "0.95"
+      - key: MIN_SCAN_HISTORY_BARS
+        value: "250"
+      - key: MIN_SCAN_STOCKS
+        value: "3000"
+      - key: CALENDAR_GAP_CHECK_DAYS
+        value: "420"
 
   - type: cron
     name: abc-a-share-daily-update-v2
@@ -52,3 +60,11 @@ services:
         value: "2021-01-01"
       - key: LIVE_SCAN_CALENDAR_DAYS
         value: "720"
+      - key: MIN_SCAN_BOOTSTRAP_COVERAGE
+        value: "0.95"
+      - key: MIN_SCAN_HISTORY_BARS
+        value: "250"
+      - key: MIN_SCAN_STOCKS
+        value: "3000"
+      - key: CALENDAR_GAP_CHECK_DAYS
+        value: "420"

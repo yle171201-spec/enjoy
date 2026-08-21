@@ -97,3 +97,55 @@ def test_portfolio_is_mark_to_market():
     t = ExecutedTrade(None,"000001","A",dates[0].date(),10,8,.1,9,dates[0].date(),10,0,dates[4].date(),10,4,0,0,"数据末端",.2,.2,0,.1,-.2)
     r = simulate_portfolio([t], {"000001": frame}, ExecutionParams(mode="next_open"), PortfolioParams(max_positions=5))
     assert r["metrics"]["mdd"] < 0
+
+
+def test_public_snapshot_rejects_before_close(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import pytest, sys
+    from types import SimpleNamespace as _SN
+    sys.modules.setdefault("akshare", _SN())
+    sys.modules.setdefault("baostock", _SN())
+    sys.modules.setdefault("tushare", _SN())
+    from app.providers.public_provider import PublicDataProvider, DailySnapshotNotReady
+
+    p = PublicDataProvider()
+    today = date(2026, 8, 21)
+    monkeypatch.setattr(p, "trade_dates", lambda start, end: [today])
+    now = datetime(2026, 8, 21, 14, 10, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with pytest.raises(DailySnapshotNotReady):
+        p.snapshot_trade_date(now)
+
+
+def test_public_snapshot_rejects_non_trading_day(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import pytest, sys
+    from types import SimpleNamespace as _SN
+    sys.modules.setdefault("akshare", _SN())
+    sys.modules.setdefault("baostock", _SN())
+    sys.modules.setdefault("tushare", _SN())
+    from app.providers.public_provider import PublicDataProvider, DailySnapshotNotReady
+
+    p = PublicDataProvider()
+    monkeypatch.setattr(p, "trade_dates", lambda start, end: [])
+    now = datetime(2026, 8, 22, 18, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    with pytest.raises(DailySnapshotNotReady):
+        p.snapshot_trade_date(now)
+
+
+def test_public_snapshot_accepts_trade_day_after_cutoff(monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import sys
+    from types import SimpleNamespace as _SN
+    sys.modules.setdefault("akshare", _SN())
+    sys.modules.setdefault("baostock", _SN())
+    sys.modules.setdefault("tushare", _SN())
+    from app.providers.public_provider import PublicDataProvider
+
+    p = PublicDataProvider()
+    today = date(2026, 8, 21)
+    monkeypatch.setattr(p, "trade_dates", lambda start, end: [today])
+    now = datetime(2026, 8, 21, 18, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    assert p.snapshot_trade_date(now) == today

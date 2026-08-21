@@ -3,11 +3,12 @@ from __future__ import annotations
 from datetime import date, timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import pandas as pd
-from sqlalchemy import select, func
+from sqlalchemy import select, func, distinct
 
 from ..config import settings
 from ..models import DataUpdateRun, Stock, DailyBar, BootstrapStock
 from ..providers import get_provider
+from ..providers.public_provider import DailySnapshotNotReady
 from .repository import upsert_stocks, upsert_bars, upsert_snapshot, latest_trade_date
 
 
@@ -17,25 +18,138 @@ def _new_run(db, provider: str, start: date | None, end: date | None) -> DataUpd
     return run
 
 
+def _bootstrap_coverage(db) -> dict:
+    total_nonst = db.execute(
+        select(func.count(Stock.code)).where(Stock.is_st.is_(False))
+    ).scalar_one()
+    tracked = db.execute(select(func.count(BootstrapStock.code))).scalar_one()
+    done = db.execute(
+        select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "ok")
+    ).scalar_one()
+    errors = db.execute(
+        select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "error")
+    ).scalar_one()
+    coverage = (float(done) / float(total_nonst)) if total_nonst else 0.0
+    return {
+        "active_nonst": int(total_nonst or 0),
+        "bootstrap_tracked": int(tracked or 0),
+        "bootstrap_done": int(done or 0),
+        "bootstrap_errors": int(errors or 0),
+        "bootstrap_coverage": coverage,
+    }
+
+
+def scan_readiness(db, check_calendar: bool = True) -> dict:
+    """Data-integrity gate for formal A/B/C scanning.
+
+    Strategy parameters are untouched. This gate only prevents cross-sectional
+    q40/breadth and peer-state calculations from running on a tiny or stale subset.
+    """
+    provider = get_provider()
+    latest = latest_trade_date(db)
+    cov = _bootstrap_coverage(db)
+
+    imported_ready_codes = 0
+    # External/legacy imports may not populate bootstrap_stocks. In that case,
+    # accept a sufficiently broad history universe instead of requiring bootstrap state.
+    if cov["bootstrap_tracked"] == 0:
+        sub = (
+            select(DailyBar.code)
+            .group_by(DailyBar.code)
+            .having(func.count(DailyBar.id) >= settings.min_scan_history_bars)
+            .subquery()
+        )
+        imported_ready_codes = int(db.execute(select(func.count()).select_from(sub)).scalar_one() or 0)
+
+    coverage_ok = (
+        cov["bootstrap_coverage"] >= settings.min_scan_bootstrap_coverage
+        if cov["bootstrap_tracked"] > 0
+        else imported_ready_codes >= settings.min_scan_stocks
+    )
+
+    expected_latest = None
+    stale = True
+    gaps: list[date] = []
+    calendar_error = ""
+    if latest is not None and check_calendar:
+        try:
+            expected_latest = provider.latest_completed_trade_date()
+            stale = latest < expected_latest
+            start = max(
+                latest - timedelta(days=settings.calendar_gap_check_days),
+                date.fromisoformat(settings.bootstrap_start_date),
+            )
+            expected = set(provider.trade_dates(start, expected_latest))
+            stored = set(db.execute(
+                select(distinct(DailyBar.trade_date)).where(
+                    DailyBar.trade_date >= start,
+                    DailyBar.trade_date <= expected_latest,
+                )
+            ).scalars().all())
+            gaps = sorted(expected - stored)
+        except Exception as e:
+            calendar_error = str(e)
+            # Do not silently declare READY when the exchange-calendar audit failed.
+            stale = True
+    elif latest is not None:
+        stale = False
+
+    ready = bool(latest and coverage_ok and not stale and not gaps and not calendar_error)
+    reasons = []
+    if not latest:
+        reasons.append("数据库尚无日线")
+    if not coverage_ok:
+        if cov["bootstrap_tracked"] > 0:
+            reasons.append(
+                f"历史覆盖率 {cov['bootstrap_coverage']:.1%} < {settings.min_scan_bootstrap_coverage:.0%}"
+            )
+        else:
+            reasons.append(
+                f"具备≥{settings.min_scan_history_bars}根日线的股票仅 {imported_ready_codes} < {settings.min_scan_stocks}"
+            )
+    if stale and latest and expected_latest:
+        reasons.append(f"最新日线 {latest} 落后于应完成交易日 {expected_latest}")
+    if gaps:
+        sample = ", ".join(map(str, gaps[:5]))
+        reasons.append(f"近期开市日存在 {len(gaps)} 个全局日期缺口：{sample}")
+    if calendar_error:
+        reasons.append(f"交易日历核验失败：{calendar_error}")
+
+    return {
+        **cov,
+        "latest": latest,
+        "expected_latest": expected_latest,
+        "imported_ready_codes": imported_ready_codes,
+        "coverage_ok": coverage_ok,
+        "stale": stale,
+        "gap_count": len(gaps),
+        "gap_sample": gaps[:5],
+        "scan_ready": ready,
+        "scan_block_reason": "；".join(reasons) if reasons else "READY",
+    }
+
+
 def data_stats(db) -> dict:
     stocks = db.execute(select(func.count(Stock.code))).scalar_one()
     bars = db.execute(select(func.count(DailyBar.id))).scalar_one()
     earliest = db.execute(select(func.min(DailyBar.trade_date))).scalar_one_or_none()
     latest = db.execute(select(func.max(DailyBar.trade_date))).scalar_one_or_none()
-    done = db.execute(select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "ok")).scalar_one()
-    errors = db.execute(select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "error")).scalar_one()
+    latest_rows = 0
+    if latest:
+        latest_rows = db.execute(
+            select(func.count(DailyBar.id)).where(DailyBar.trade_date == latest)
+        ).scalar_one()
+
+    ready = scan_readiness(db, check_calendar=True)
     return {
         "stocks": int(stocks or 0), "bars": int(bars or 0), "earliest": earliest, "latest": latest,
-        "bootstrap_done": int(done or 0), "bootstrap_errors": int(errors or 0),
+        "latest_rows": int(latest_rows or 0),
+        **ready,
     }
 
 
 def bootstrap_batch(db, start=None, end=None, limit=None):
-    """Backfill a resumable batch of current non-ST A shares from public history.
-
-    Completion is tracked per stock in ``bootstrap_stocks`` so a restart/deploy does
-    not lose progress. This is intentionally separate from the cheap daily EOD snapshot.
-    """
+    """Backfill a resumable batch of current non-ST A shares from public history."""
     provider = get_provider()
     start = start or date.fromisoformat(settings.bootstrap_start_date)
     end = end or provider.latest_completed_trade_date()
@@ -60,7 +174,6 @@ def bootstrap_batch(db, start=None, end=None, limit=None):
 
         results = []
         errors = []
-        # PublicDataProvider serializes BaoStock access; other providers may use >1 worker.
         workers = max(1, int(getattr(provider, "max_workers", 1)))
 
         def one(r):
@@ -98,18 +211,36 @@ def bootstrap_batch(db, start=None, end=None, limit=None):
         raise
 
 
-def sync_daily_public(db):
-    """Cheap production EOD update using one public all-A snapshot request.
+def sync_daily_public(db, now: datetime | None = None):
+    """Safe one-shot EOD update.
 
-    The target date is resolved against the A-share trading calendar and is never
-    treated as complete before 16:00 Asia/Shanghai.
+    A live spot snapshot is accepted only on the current A-share trading day and
+    only after 16:10 Asia/Shanghai. Before close, weekends and holidays are a safe
+    no-op: no OHLCV row is written and no historical date is relabeled.
     """
     provider = get_provider()
-    target = provider.latest_completed_trade_date()
-    before = latest_trade_date(db)
-    run = _new_run(db, f"{getattr(provider, 'name', 'provider')}-snapshot", target, target)
+    pname = f"{getattr(provider, 'name', 'provider')}-snapshot"
+
     try:
-        snap = provider.daily_snapshot(target)
+        if hasattr(provider, "snapshot_trade_date"):
+            target = provider.snapshot_trade_date(now)
+        else:
+            target = provider.latest_completed_trade_date(now)
+    except DailySnapshotNotReady as e:
+        run = _new_run(db, pname, None, None)
+        run.status = "skipped"
+        run.message = str(e)
+        run.finished_at = datetime.utcnow(); db.commit()
+        return {"status": "skipped", "target": None, "rows": 0, "message": str(e)}
+
+    before = latest_trade_date(db)
+    run = _new_run(db, pname, target, target)
+    try:
+        if getattr(provider, "name", "") == "public":
+            snap = provider.daily_snapshot(target, now=now)
+        else:
+            snap = provider.daily_snapshot(target)
+
         meta = snap[["code", "name", "market", "board", "is_st"]].drop_duplicates("code")
         upsert_stocks(db, meta)
         valid = snap[~snap.is_st].copy()
@@ -124,22 +255,22 @@ def sync_daily_public(db):
             try:
                 missed = provider.trade_dates(before + timedelta(days=1), target)
                 if len(missed) > 1:
-                    note += f"; WARNING: DB可能缺失{len(missed)-1}个中间交易日，需执行历史补洞"
-            except Exception:
-                pass
+                    note += f"; WARNING: DB可能缺失{len(missed)-1}个中间交易日，正式扫描会被完整性门阻止"
+            except Exception as e:
+                note += f"; calendar-check warning: {e}"
         run.message = note
         run.finished_at = datetime.utcnow(); db.commit()
-        return {"target": target, "rows": n, "message": note}
+        return {"status": run.status, "target": target, "rows": n, "message": note}
+    except DailySnapshotNotReady as e:
+        run.status = "skipped"; run.message = str(e); run.finished_at = datetime.utcnow(); db.commit()
+        return {"status": "skipped", "target": None, "rows": 0, "message": str(e)}
     except Exception as e:
         run.status = "error"; run.message = str(e); run.finished_at = datetime.utcnow(); db.commit()
         raise
 
 
 def sync_market(db, start=None, end=None, workers=None, limit=None):
-    """Per-stock historical repair/update path.
-
-    Kept for explicit repairs. The normal daily job should use ``sync_daily_public``.
-    """
+    """Per-stock historical repair/update path."""
     provider = get_provider()
     end = end or provider.latest_completed_trade_date()
     latest = latest_trade_date(db)
