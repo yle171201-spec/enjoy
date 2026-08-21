@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}明日候选{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <span class="eyebrow">POST-CLOSE SCAN</span>
+    <h1>明日候选</h1>
+    <p>只展示数据库最新完成交易日产生的正式 A/B/C 信号。第二天输入真实开盘/成交价后重新计算最终仓位。</p>
+  </div>
+  <div class="status">
+    <div>最新日线 <b>{{ latest or '暂无' }}</b></div>
+    <div>策略 <b>V18 / Web V2</b></div>
+    <div>Golden <b class="{{'ok' if golden_pass else 'warn-text'}}">{{'PASS' if golden_pass else '未通过/未扫描'}}</b></div>{% if update %}<div>数据更新 <b>{{update.status}} {{update.success_count}}/{{update.stock_count}}</b></div>{% endif %}
+  </div>
+</section>
+
+<div class="cards">
+  <div class="card engine-a"><b>A 主仓</b><strong>{{ counts.A }}</strong><span>老压力突破回踩</span></div>
+  <div class="card engine-b"><b>B 主仓</b><strong>{{ counts.B }}</strong><span>强启动首回踩</span></div>
+  <div class="card engine-c"><b>C 卫星</b><strong>{{ counts.C }}</strong><span>高位横强再启动</span></div>
+</div>
+
+{% if signals %}
+<section>
+  <div class="section-head"><div><span class="eyebrow">{{ signal_date }}</span><h2>明日执行清单</h2></div><a class="btn" href="/screener?n=5">看最近5日</a></div>
+  <div class="signal-grid">
+  {% for s,st in signals %}
+    <article class="signal-card engine-{{s.engine|lower}}">
+      <div class="signal-top"><div><span class="tag tag-{{s.engine}}">{{s.engine}}买</span><a href="/stock/{{s.code}}"><h3>{{s.code}} {{ st.name if st else '' }}</h3></a></div><b>{{'%.1f%%'|format(s.target_weight*100)}}</b></div>
+      <dl>
+        <dt>信号收盘</dt><dd>{{'%.2f'|format(s.signal_close)}}</dd>
+        <dt>结构失效</dt><dd>{{'%.2f'|format(s.fail_price)}}</dd>
+        <dt>结构风险</dt><dd>{{'%.1f%%'|format(s.risk_pct*100)}}</dd>
+        <dt>定位</dt><dd>{{'卫星仓' if s.engine=='C' else '主仓'}}</dd>
+      </dl>
+      <div class="actions"><a class="btn primary" href="/execution?signal_id={{s.id}}">输入次日成交价</a><a class="btn ghost" href="/stock/{{s.code}}">看结构图</a></div>
+    </article>
+  {% endfor %}
+  </div>
+</section>
+{% else %}
+<div class="empty"><b>{{latest or '当前'}}没有正式 A/B/C 新买点。</b><span>这是正常状态，不为了每天有票而放宽策略。可去 N日选股 查看近期信号。</span></div>
+{% endif %}
+
+{% if scan %}
+<section class="note">
+  <b>最近完整扫描：</b>{{scan.status}} ｜ A {{scan.a_count}} / B {{scan.b_count}} / C {{scan.c_count}} / 合计 {{scan.combined_count}} ｜ Golden matched {{scan.golden_matched if scan.golden_matched is not none else '-'}} / missing {{scan.golden_missing if scan.golden_missing is not none else '-'}} / extra {{scan.golden_extra if scan.golden_extra is not none else '-'}}
+</section>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,33 @@
+# Smoke-test Blueprint: free web + free Postgres only.
+# Full-market daily scan is intentionally NOT scheduled here because the free database
+# expires and the free web instance is not sized for a 4k-stock full-history scan.
+databases:
+  - name: abc-a-share-db-v2-test
+    databaseName: abc_strategy
+    user: abc_strategy
+    region: singapore
+    plan: free
+
+services:
+  - type: web
+    name: abc-a-share-web-v2-test
+    runtime: docker
+    region: singapore
+    plan: free
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: abc-a-share-db-v2-test
+          property: connectionString
+      - key: APP_PASSWORD
+        sync: false
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: DATA_PROVIDER
+        value: tushare
+      - key: TUSHARE_TOKEN
+        sync: false

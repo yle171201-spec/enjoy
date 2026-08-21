@@ -1,0 +1,26 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: abc_strategy
+      POSTGRES_USER: abc_strategy
+      POSTGRES_PASSWORD: abc_strategy
+    volumes:
+      - abc_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U abc_strategy -d abc_strategy"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://abc_strategy:abc_strategy@db:5432/abc_strategy
+    depends_on:
+      db:
+        condition: service_healthy
+volumes:
+  abc_pg:

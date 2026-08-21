@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}次日机械仓位{% endblock %}
+{% block content %}
+<div class="section-head"><div><span class="eyebrow">NEXT OPEN EXECUTION</span><h1>次日实际成交仓位</h1><p>T日信号与失效价冻结；T+1只用实际成交价重新计算结构风险和仓位，不重新决定是否有信号。</p></div></div>
+{% if signal %}
+<div class="exec-grid">
+  <div class="panel"><h2>{{signal.code}} {{stock.name if stock else ''}} · <span class="tag tag-{{signal.engine}}">{{signal.engine}}买</span></h2><p>信号日 {{signal.signal_date}}</p><dl><dt>信号收盘</dt><dd>{{'%.2f'|format(signal.signal_close)}}</dd><dt>结构失效价</dt><dd>{{'%.2f'|format(signal.fail_price)}}</dd><dt>收盘预估仓位</dt><dd>{{'%.1f%%'|format(signal.target_weight*100)}}</dd><dt>风险预算</dt><dd>{{'1.5%' if signal.engine=='C' else '2.5%'}}</dd></dl><a class="btn ghost" href="/stock/{{signal.code}}">先看结构图</a></div>
+  <form class="panel" method="post"><input type="hidden" name="signal_id" value="{{signal.id}}"><label>第二天实际开盘 / 计划成交价<input name="entry_price" inputmode="decimal" type="number" step="0.01" required autofocus></label><button class="primary">重新计算最终仓位</button>
+  {% if result %}{% if result.skip %}<div class="danger"><b>跳过</b><span>{{result.reason}}</span></div>{% else %}<div class="result"><span>最终目标仓位</span><b>{{'%.1f%%'|format(result.weight*100)}}</b><dl><dt>真实结构风险</dt><dd>{{'%.2f%%'|format(result.risk*100)}}</dd><dt>相对信号收盘缺口</dt><dd>{{'%.2f%%'|format(result.gap_vs_signal*100)}}</dd><dt>风险预算</dt><dd>{{'%.1f%%'|format(result.budget*100)}}</dd></dl></div>{% endif %}{% endif %}</form>
+</div>
+{% else %}<div class="empty">请从“明日候选”选择一笔信号。</div>{% endif %}
+{% endblock %}

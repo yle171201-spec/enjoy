@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}账户回测{% endblock %}
+{% block content %}
+<div class="section-head"><div><span class="eyebrow">PORTFOLIO MTM</span><h1>K5 / K7 账户级回测</h1><p>逐日 mark-to-market，A/B优先于C；C最多1只，满仓出现新A/B时C可让位。NEXT_OPEN在开盘入场、动态退出在收盘执行。</p></div></div>
+<form class="toolbar" method="post">
+<label>发动机<select name="engines">{% for x in ['ABC','AB','AC','BC','A','B','C'] %}<option {% if engines==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label>
+<label>执行<select name="execution"><option value="next_open" {% if execution!='close' %}selected{% endif %}>次日开盘</option><option value="close" {% if execution=='close' %}selected{% endif %}>信号收盘</option></select></label>
+<label>最大持仓K<input name="k" type="number" min="1" max="20" value="{{k or 5}}"></label>
+<label>A/B风险预算%<input name="ab_risk" type="number" step="0.1" value="{{ab_risk or 2.5}}"></label>
+<label>C风险预算%<input name="c_risk" type="number" step="0.1" value="{{c_risk or 1.5}}"></label>
+<label>单股上限%<input name="max_weight" type="number" step="1" value="{{max_weight or 20}}"></label>
+<label>开始<input type="date" name="start" value="{{start or ''}}"></label><label>结束<input type="date" name="end" value="{{end or ''}}"></label>
+<label>滑点bps<input name="slippage_bps" type="number" value="{{slippage_bps or 0}}"></label>
+<label>佣金bps<input name="commission_bps" type="number" step="0.1" value="{{commission_bps or 0}}"></label>
+<label>卖出税费bps<input name="stamp_tax_bps" type="number" step="0.1" value="{{stamp_tax_bps or 0}}"></label>
+<label>MC种子数<input name="monte_carlo_seeds" type="number" min="0" max="500" value="{{monte_carlo_seeds or 0}}"></label>
+<button>运行账户回测</button>
+</form>
+{% if result %}{% set m=result.metrics %}
+<div class="metrics portfolio-metrics"><div><span>CAGR</span><b>{{'%.1f%%'|format(m.cagr*100)}}</b></div><div><span>最大回撤</span><b class="neg">{{'%.1f%%'|format(m.mdd*100)}}</b></div><div><span>终值</span><b>{{'%.2f'|format(m.terminal)}}x</b></div><div><span>CAGR/|MDD|</span><b>{{'%.2f'|format(m.calmar_like)}}</b></div><div><span>接纳交易</span><b>{{m.accepted}}</b></div><div><span>满仓拒绝</span><b>{{m.full_rejections}}</b></div><div><span>C让位</span><b>{{m.c_replacements}}</b></div><div><span>最长水下</span><b>{{m.max_underwater_days}}T</b></div></div>
+<div class="note"><b>最大回撤区间：</b>{{m.peak_date or '-'}} → {{m.trough_date or '-'}} ｜ 恢复 {{m.recovery_date or '样本末未恢复'}} ｜ 接纳 A/B/C = {{m.accepted_A}} / {{m.accepted_B}} / {{m.accepted_C}}</div>
+<div id="equity-chart" class="chart portfolio-chart"></div><script>drawEquity('equity-chart', {{chart_json|safe}});</script>
+<section><h2>逐年账户表现</h2><div class="table-wrap"><table><thead><tr><th>年份</th><th>年度收益</th><th>年度MDD</th><th>年末净值</th></tr></thead><tbody>{% for y in result.yearly %}<tr><td>{{y.year}}</td><td class="{{'pos' if y.return>0 else 'neg'}}">{{'%.1f%%'|format(y.return*100)}}</td><td class="neg">{{'%.1f%%'|format(y.mdd*100)}}</td><td>{{'%.2f'|format(y.end_equity)}}x</td></tr>{% endfor %}</tbody></table></div></section>
+{% if result.monte_carlo %}{% set mc=result.monte_carlo %}<section><h2>同日容量 Monte Carlo</h2><div class="metrics"><div><span>终值 P10 / P50 / P90</span><b>{{'%.2f'|format(mc.terminal_p10)}} / {{'%.2f'|format(mc.terminal_p50)}} / {{'%.2f'|format(mc.terminal_p90)}}</b></div><div><span>CAGR P50</span><b>{{'%.1f%%'|format(mc.cagr_p50*100)}}</b></div><div><span>MDD P10 / P50</span><b>{{'%.1f%%'|format(mc.mdd_p10*100)}} / {{'%.1f%%'|format(mc.mdd_p50*100)}}</b></div><div><span>接纳N P50</span><b>{{'%.0f'|format(mc.accepted_p50)}}</b></div></div></section>{% endif %}
+{% endif %}
+{% endblock %}
