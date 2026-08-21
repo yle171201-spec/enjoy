@@ -121,6 +121,67 @@ def _db_storage_stats(db, stats: dict) -> dict:
     }
 
 
+def _live_data_progress(db) -> dict:
+    # Lightweight DB-only status for browser polling.
+    stocks = int(db.execute(select(func.count(Stock.code))).scalar_one() or 0)
+    bars = int(db.execute(select(func.count(DailyBar.id))).scalar_one() or 0)
+    active_nonst = int(db.execute(
+        select(func.count(Stock.code)).where(Stock.is_st.is_(False))
+    ).scalar_one() or 0)
+    bootstrap_done = int(db.execute(
+        select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "ok")
+    ).scalar_one() or 0)
+    bootstrap_errors = int(db.execute(
+        select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "error")
+    ).scalar_one() or 0)
+    coverage = (bootstrap_done / active_nonst) if active_nonst else 0.0
+
+    latest = db.execute(select(func.max(DailyBar.trade_date))).scalar_one_or_none()
+    latest_rows = 0
+    if latest is not None:
+        latest_rows = int(db.execute(
+            select(func.count(DailyBar.id)).where(DailyBar.trade_date == latest)
+        ).scalar_one() or 0)
+
+    update = db.execute(
+        select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)
+    ).scalar_one_or_none()
+
+    bootstrap_busy = bool(db.execute(
+        select(func.count(DataUpdateRun.id)).where(
+            DataUpdateRun.status == "running",
+            DataUpdateRun.provider.like("%-bootstrap%"),
+        )
+    ).scalar_one() or 0)
+
+    update_payload = None
+    if update is not None:
+        update_payload = {
+            "status": update.status,
+            "provider": update.provider,
+            "start_date": str(update.start_date) if update.start_date else None,
+            "end_date": str(update.end_date) if update.end_date else None,
+            "stock_count": int(update.stock_count or 0),
+            "success_count": int(update.success_count or 0),
+            "failed_count": int(update.failed_count or 0),
+            "message": update.message or "",
+        }
+
+    return {
+        "stats": {
+            "stocks": stocks,
+            "bars": bars,
+            "bootstrap_done": bootstrap_done,
+            "bootstrap_errors": bootstrap_errors,
+            "bootstrap_coverage": coverage,
+            "latest": str(latest) if latest else None,
+            "latest_rows": latest_rows,
+        },
+        "update": update_payload,
+        "bootstrap_busy": bootstrap_busy,
+    }
+
+
 @app.on_event("startup")
 def startup():
     init_db()
@@ -345,6 +406,11 @@ def portfolio_run(
         "slippage_bps": slippage_bps, "commission_bps": commission_bps,
         "stamp_tax_bps": stamp_tax_bps, "monte_carlo_seeds": monte_carlo_seeds,
     })
+
+
+@app.get("/api/data/progress")
+def data_progress(db=Depends(db_session)):
+    return _live_data_progress(db)
 
 
 @app.get("/data", response_class=HTMLResponse)
