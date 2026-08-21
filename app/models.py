@@ -85,3 +85,12 @@ class DataUpdateRun(Base):
     failed_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(24), default="running")
     message: Mapped[str] = mapped_column(Text, default="")
+
+
+class BootstrapStock(Base):
+    __tablename__ = "bootstrap_stocks"
+    code: Mapped[str] = mapped_column(String(6), primary_key=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

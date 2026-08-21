@@ -1,10 +1,8 @@
-"""Render compatibility shim for Starlette/Jinja2 templates.
+"""Application package.
 
-The app uses the older positional call style:
-    templates.TemplateResponse("page.html", {"request": request, ...})
-
-Some Starlette versions deployed by Render expect the newer keyword/request-first
-signature. This shim translates the old style to the new style for every page.
+Includes a Starlette/Jinja2 compatibility shim because recent Starlette releases
+expect ``TemplateResponse(request=..., name=..., context=...)`` while the V2
+page handlers used the older positional form.
 """
 
 from starlette.templating import Jinja2Templates
@@ -19,7 +17,6 @@ def _template_response_compat(self, *args, **kwargs):
         request = context.get("request")
         if request is None:
             raise ValueError("Template context must contain 'request'")
-
         return _original_template_response(
             self,
             request=request,
@@ -27,7 +24,6 @@ def _template_response_compat(self, *args, **kwargs):
             context=context,
             **kwargs,
         )
-
     return _original_template_response(self, *args, **kwargs)
 
 

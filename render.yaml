@@ -1,6 +1,6 @@
 # Smoke-test Blueprint: free web + free Postgres only.
-# Full-market daily scan is intentionally NOT scheduled here because the free database
-# expires and the free web instance is not sized for a 4k-stock full-history scan.
+# The app can pull public data without any token. Full-market multi-year history is
+# intentionally NOT auto-bootstrapped on the free 1 GB / 30-day test database.
 databases:
   - name: abc-a-share-db-v2-test
     databaseName: abc_strategy
@@ -28,6 +28,10 @@ services:
       - key: COOKIE_SECURE
         value: "1"
       - key: DATA_PROVIDER
-        value: tushare
-      - key: TUSHARE_TOKEN
-        sync: false
+        value: public
+      - key: BOOTSTRAP_START_DATE
+        value: "2025-01-01"
+      - key: BOOTSTRAP_BATCH_SIZE
+        value: "100"
+      - key: LIVE_SCAN_CALENDAR_DAYS
+        value: "720"

@@ -4,25 +4,43 @@ from datetime import date, timedelta
 from pathlib import Path
 import json
 
-from fastapi import FastAPI, Request, Depends, Form, Query, HTTPException
+from fastapi import FastAPI, Request, Depends, Form, Query, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, func, distinct
 
 from .config import settings
-from .db import init_db, db_session
-from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun
+from .db import init_db, db_session, SessionLocal
+from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock
 from .auth import valid_password, make_cookie, is_logged_in, COOKIE
 from .services.repository import latest_trade_date, latest_prices
 from .services.strategy_service import run_full_scan
 from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.chart_service import build_stock_chart
+from .services.data_update import data_stats, bootstrap_batch, sync_daily_public
 
 BASE = Path(__file__).resolve().parent
 app = FastAPI(title=settings.app_name, version="2.0")
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=BASE / "templates")
+
+
+def _bg_bootstrap(limit: int):
+    db = SessionLocal()
+    try:
+        bootstrap_batch(db, limit=limit)
+    finally:
+        db.close()
+
+
+def _bg_daily_and_scan():
+    db = SessionLocal()
+    try:
+        sync_daily_public(db)
+        run_full_scan(db)
+    finally:
+        db.close()
 
 
 @app.on_event("startup")
@@ -244,6 +262,33 @@ def portfolio_run(
         "slippage_bps": slippage_bps, "commission_bps": commission_bps,
         "stamp_tax_bps": stamp_tax_bps, "monte_carlo_seeds": monte_carlo_seeds,
     })
+
+
+@app.get("/data", response_class=HTMLResponse)
+def data_page(request: Request, db=Depends(db_session)):
+    stats = data_stats(db)
+    update = db.execute(select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)).scalar_one_or_none()
+    errors = db.execute(
+        select(BootstrapStock).where(BootstrapStock.status == "error").order_by(BootstrapStock.updated_at.desc()).limit(20)
+    ).scalars().all()
+    return templates.TemplateResponse("data.html", {
+        "request": request, "stats": stats, "update": update, "errors": errors,
+        "provider": settings.data_provider, "bootstrap_start": settings.bootstrap_start_date,
+        "batch_size": settings.bootstrap_batch_size,
+    })
+
+
+@app.post("/admin/bootstrap")
+def admin_bootstrap(background_tasks: BackgroundTasks, limit: int = Form(100)):
+    limit = max(1, min(int(limit), 500))
+    background_tasks.add_task(_bg_bootstrap, limit)
+    return RedirectResponse("/data", 303)
+
+
+@app.post("/admin/daily-update")
+def admin_daily_update(background_tasks: BackgroundTasks):
+    background_tasks.add_task(_bg_daily_and_scan)
+    return RedirectResponse("/data", 303)
 
 
 @app.get("/validation", response_class=HTMLResponse)

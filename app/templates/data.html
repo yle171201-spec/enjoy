@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}数据管理{% endblock %}
+{% block content %}
+<section class="hero">
+  <div>
+    <span class="eyebrow">PUBLIC DATA PIPELINE</span>
+    <h1>数据管理</h1>
+    <p>无需 Tushare Token。历史初始化优先使用 BaoStock 不复权日线，日常收盘后用 AKShare 全市场快照一次性更新当日 OHLCV、成交额和换手率；失败时保留历史接口修复通道。</p>
+  </div>
+  <div class="status">
+    <div>数据源 <b>{{ provider }}</b></div>
+    <div>初始化起点 <b>{{ bootstrap_start }}</b></div>
+    <div>最新日线 <b>{{ stats.latest or '暂无' }}</b></div>
+    <div>历史最早 <b>{{ stats.earliest or '暂无' }}</b></div>
+  </div>
+</section>
+
+<div class="metrics">
+  <div><span>股票元数据</span><b>{{ '{:,}'.format(stats.stocks) }}</b></div>
+  <div><span>日线总行数</span><b>{{ '{:,}'.format(stats.bars) }}</b></div>
+  <div><span>已完成历史初始化</span><b>{{ '{:,}'.format(stats.bootstrap_done) }}</b></div>
+  <div><span>初始化错误</span><b class="{{'warn-text' if stats.bootstrap_errors else 'ok'}}">{{ stats.bootstrap_errors }}</b></div>
+</div>
+
+<div class="compare-grid">
+  <section class="panel">
+    <span class="eyebrow">FIRST BOOTSTRAP</span>
+    <h2>历史初始化（可断点续传）</h2>
+    <p class="muted">每次只处理一批股票，完成状态写入数据库；Render 重启或重新部署后仍会从未完成股票继续。测试版建议先 50～100 只验证链路，正式数据库再跑全市场。</p>
+    <form method="post" action="/admin/bootstrap" class="toolbar compact-toolbar">
+      <label>本批股票数<input name="limit" type="number" value="{{ batch_size }}" min="1" max="500"></label>
+      <button type="submit">后台初始化下一批</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <span class="eyebrow">POST-CLOSE DAILY</span>
+    <h2>收盘后更新 + ABC扫描</h2>
+    <p class="muted">按北京时间判断“已完成交易日”。16:00 前不会把当天当成完整日线；收盘后通过公开全市场快照更新，随后自动运行 V18 扫描。</p>
+    <form method="post" action="/admin/daily-update">
+      <button type="submit" class="primary">立即执行一次收盘更新</button>
+    </form>
+    <p class="muted">正式版由 Render Cron 在工作日北京时间 18:30 自动执行，无需每天手工点。</p>
+  </section>
+</div>
+
+{% if update %}
+<section class="note">
+  <b>最近数据任务：</b>{{ update.status }} ｜ {{ update.provider }} ｜ {{ update.start_date or '-' }} → {{ update.end_date or '-' }} ｜ 成功 {{ update.success_count }}/{{ update.stock_count }} ｜ 失败 {{ update.failed_count }}
+  {% if update.message %}<pre>{{ update.message }}</pre>{% endif %}
+</section>
+{% endif %}
+
+{% if errors %}
+<section>
+  <div class="section-head"><div><span class="eyebrow">RETRY QUEUE</span><h2>最近初始化错误</h2></div></div>
+  <div class="table-wrap"><table><thead><tr><th>代码</th><th>状态</th><th>行数</th><th>更新时间</th><th>信息</th></tr></thead><tbody>
+  {% for e in errors %}<tr><td>{{e.code}}</td><td>{{e.status}}</td><td>{{e.row_count}}</td><td>{{e.updated_at}}</td><td>{{e.message}}</td></tr>{% endfor %}
+  </tbody></table></div>
+</section>
+{% endif %}
+
+<section class="note">
+  <b>当前测试环境提示：</b>Render Free Postgres 只有 1 GB 且 30 天到期，因此测试库只用于验证自动数据链路。全市场多年历史、Golden 198 和长期回测应迁移到持久化付费数据库后再完整初始化。
+</section>
+{% endblock %}

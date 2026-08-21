@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 
 from ..engine.strategy_reference_v18 import run_close_reference, compare_to_golden
-from ..models import ScanRun
+from ..models import ScanRun, DailyBar
 from .repository import load_all_frames, replace_signals, latest_trade_date
+from ..config import settings
+from sqlalchemy import select, func
 
 GOLDEN = Path(__file__).resolve().parents[2] / "golden" / "ABC_V18_历史信号载荷.csv"
 
@@ -36,13 +38,19 @@ def run_full_scan(db):
     run = ScanRun(status="running", data_date=latest_trade_date(db))
     db.add(run); db.commit(); db.refresh(run)
     try:
-        frames = load_all_frames(db)
+        latest = latest_trade_date(db)
+        cutoff = latest - timedelta(days=settings.live_scan_calendar_days) if latest else None
+        frames = load_all_frames(db, start_date=cutoff)
         if not frames:
             raise RuntimeError("数据库没有日线数据，请先更新/导入数据")
         sig, diag = run_close_reference(frames, run_exits=True)
         sig = _attach_exit_dates(sig, frames)
         replace_signals(db, sig, "V18")
-        cmp = compare_to_golden(sig, str(GOLDEN)) if GOLDEN.exists() else {}
+        earliest_db = db.execute(select(func.min(DailyBar.trade_date))).scalar_one_or_none()
+        # Golden spans the historical research period; a live-only rolling database must not
+        # be mislabeled as a failed reproduction.
+        can_validate_golden = bool(earliest_db and earliest_db <= datetime(2022, 1, 5).date())
+        cmp = compare_to_golden(sig, str(GOLDEN)) if GOLDEN.exists() and can_validate_golden else {}
         run.a_count = int((sig.engine == "A").sum())
         run.b_count = int((sig.engine == "B").sum())
         run.c_count = int((sig.engine == "C").sum())

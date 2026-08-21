@@ -11,3 +11,4 @@ akshare>=1.18
 tushare>=1.4
 itsdangerous>=2.2
 httpx>=0.27
+baostock==0.9.3

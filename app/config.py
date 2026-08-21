@@ -17,6 +17,9 @@ class Settings:
     data_provider: str = _env("DATA_PROVIDER", "akshare").lower()
     tushare_token: str = _env("TUSHARE_TOKEN", "")
     strategy_start_date: str = _env("STRATEGY_START_DATE", "2022-01-01")
+    bootstrap_start_date: str = _env("BOOTSTRAP_START_DATE", "2025-01-01")
+    bootstrap_batch_size: int = int(_env("BOOTSTRAP_BATCH_SIZE", "100"))
+    live_scan_calendar_days: int = int(_env("LIVE_SCAN_CALENDAR_DAYS", "720"))
     default_n_days: int = int(_env("DEFAULT_N_DAYS", "20"))
     slippage_bps: float = float(_env("SLIPPAGE_BPS", "0"))
     web_version: str = "V2"

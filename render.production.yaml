@@ -4,6 +4,7 @@ databases:
     user: abc_strategy
     region: singapore
     plan: basic-256mb
+    diskSizeGB: 5
 
 services:
   - type: web
@@ -25,9 +26,13 @@ services:
       - key: COOKIE_SECURE
         value: "1"
       - key: DATA_PROVIDER
-        value: tushare
-      - key: TUSHARE_TOKEN
-        sync: false
+        value: public
+      - key: BOOTSTRAP_START_DATE
+        value: "2021-01-01"
+      - key: BOOTSTRAP_BATCH_SIZE
+        value: "200"
+      - key: LIVE_SCAN_CALENDAR_DAYS
+        value: "720"
 
   - type: cron
     name: abc-a-share-daily-update-v2
@@ -42,6 +47,8 @@ services:
           name: abc-a-share-db-v2
           property: connectionString
       - key: DATA_PROVIDER
-        value: tushare
-      - key: TUSHARE_TOKEN
-        sync: false
+        value: public
+      - key: BOOTSTRAP_START_DATE
+        value: "2021-01-01"
+      - key: LIVE_SCAN_CALENDAR_DAYS
+        value: "720"
