@@ -35,6 +35,8 @@ services:
         value: "2025-01-01"
       - key: BOOTSTRAP_BATCH_SIZE
         value: "100"
+      - key: BOOTSTRAP_STOCK_TIMEOUT_SECONDS
+        value: "60"
       - key: LIVE_SCAN_CALENDAR_DAYS
         value: "720"
       - key: MIN_SCAN_BOOTSTRAP_COVERAGE

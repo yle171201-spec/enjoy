@@ -20,6 +20,7 @@ class Settings:
     strategy_start_date: str = _env("STRATEGY_START_DATE", "2022-01-01")
     bootstrap_start_date: str = _env("BOOTSTRAP_START_DATE", "2025-01-01")
     bootstrap_batch_size: int = int(_env("BOOTSTRAP_BATCH_SIZE", "100"))
+    bootstrap_stock_timeout_seconds: int = int(_env("BOOTSTRAP_STOCK_TIMEOUT_SECONDS", "60"))
     live_scan_calendar_days: int = int(_env("LIVE_SCAN_CALENDAR_DAYS", "720"))
     min_scan_bootstrap_coverage: float = float(_env("MIN_SCAN_BOOTSTRAP_COVERAGE", "0.95"))
     min_scan_history_bars: int = int(_env("MIN_SCAN_HISTORY_BARS", "250"))
@@ -27,7 +28,7 @@ class Settings:
     calendar_gap_check_days: int = int(_env("CALENDAR_GAP_CHECK_DAYS", "420"))
     default_n_days: int = int(_env("DEFAULT_N_DAYS", "20"))
     slippage_bps: float = float(_env("SLIPPAGE_BPS", "0"))
-    web_version: str = "V2.1.2"
+    web_version: str = "V2.1.3"
     strategy_version: str = "V18"
     cookie_secure: bool = _env("COOKIE_SECURE", "0").lower() in {"1","true","yes","on"}
 

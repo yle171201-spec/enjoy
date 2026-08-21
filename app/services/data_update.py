@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing as mp
 import pandas as pd
 from sqlalchemy import select, func, distinct
 
@@ -148,66 +149,212 @@ def data_stats(db) -> dict:
     }
 
 
-def bootstrap_batch(db, start=None, end=None, limit=None):
-    """Backfill a resumable batch of current non-ST A shares from public history."""
+def recover_interrupted_runs(db) -> int:
+    # Mark stale running update rows left by a previous web process as interrupted.
+    runs = db.execute(
+        select(DataUpdateRun).where(DataUpdateRun.status == "running")
+    ).scalars().all()
+    if not runs:
+        return 0
+
+    for run in runs:
+        old = (run.message or "").strip()
+        note = "服务重启后检测到未完成任务；已标记 interrupted，可安全续传。"
+        run.message = f"{old}\n{note}".strip()
+        run.status = "interrupted"
+        run.finished_at = datetime.utcnow()
+    db.commit()
+    return len(runs)
+
+
+def _history_child(send_conn, code: str, start: date, end: date) -> None:
+    # Fetch one stock in an isolated child process.
+    try:
+        provider = get_provider()
+        frame = provider.history(code, start, end)
+        send_conn.send(("ok", frame, ""))
+    except Exception as e:
+        try:
+            send_conn.send(("error", None, f"{type(e).__name__}: {e}"))
+        except Exception:
+            pass
+    finally:
+        try:
+            send_conn.close()
+        except Exception:
+            pass
+
+
+def _history_with_timeout(code: str, start: date, end: date, timeout_seconds: int):
+    # Use spawn because FastAPI sync background tasks run from a threadpool.
+    timeout_seconds = max(10, int(timeout_seconds))
+    ctx = mp.get_context("spawn")
+    recv_conn, send_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(
+        target=_history_child,
+        args=(send_conn, code, start, end),
+        daemon=True,
+    )
+    proc.start()
+    send_conn.close()
+
+    try:
+        if not recv_conn.poll(timeout_seconds):
+            proc.terminate()
+            proc.join(5)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(2)
+            raise TimeoutError(f"单股历史抓取超过 {timeout_seconds}s")
+
+        try:
+            status, frame, message = recv_conn.recv()
+        except EOFError:
+            proc.join(1)
+            raise RuntimeError(f"历史抓取子进程异常退出 exitcode={proc.exitcode}")
+
+        proc.join(5)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(2)
+
+        if status != "ok":
+            raise RuntimeError(message or "历史抓取失败")
+        return frame
+    finally:
+        try:
+            recv_conn.close()
+        except Exception:
+            pass
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(2)
+
+
+def _active_bootstrap(db):
+    return db.execute(
+        select(DataUpdateRun)
+        .where(
+            DataUpdateRun.status == "running",
+            DataUpdateRun.provider.like("%-bootstrap%"),
+        )
+        .order_by(DataUpdateRun.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+def bootstrap_batch(db, start=None, end=None, limit=None, retry_errors: bool = False):
+    # Backfill without letting one bad stock block the normal queue.
+    active = _active_bootstrap(db)
+    if active is not None:
+        return []
+
     provider = get_provider()
     start = start or date.fromisoformat(settings.bootstrap_start_date)
     end = end or provider.latest_completed_trade_date()
     limit = int(limit or settings.bootstrap_batch_size)
-    run = _new_run(db, f"{getattr(provider, 'name', 'provider')}-bootstrap", start, end)
+    timeout_seconds = max(10, int(settings.bootstrap_stock_timeout_seconds))
+    pname = f"{getattr(provider, 'name', 'provider')}-bootstrap"
+    if retry_errors:
+        pname += "-retry"
+    run = _new_run(db, pname, start, end)
 
     try:
         stocks = provider.stock_list()
         upsert_stocks(db, stocks)
         rows = stocks[~stocks.is_st].copy()
-        completed = set(db.execute(
-            select(BootstrapStock.code).where(BootstrapStock.status == "ok")
-        ).scalars().all())
-        rows = rows[~rows.code.astype(str).str.zfill(6).isin(completed)].head(limit)
-        run.stock_count = len(rows); db.commit()
+        rows["code"] = rows.code.astype(str).str.zfill(6)
+
+        if retry_errors:
+            error_codes = set(db.execute(
+                select(BootstrapStock.code).where(BootstrapStock.status == "error")
+            ).scalars().all())
+            rows = rows[rows.code.isin(error_codes)].head(limit)
+        else:
+            quarantined = set(db.execute(
+                select(BootstrapStock.code).where(
+                    BootstrapStock.status.in_(("ok", "error"))
+                )
+            ).scalars().all())
+            rows = rows[~rows.code.isin(quarantined)].head(limit)
+
+        run.stock_count = len(rows)
+        run.success_count = 0
+        run.failed_count = 0
+        db.commit()
 
         if rows.empty:
             run.status = "complete"
-            run.message = "所有当前非ST股票均已完成历史初始化"
-            run.finished_at = datetime.utcnow(); db.commit()
+            run.message = (
+                "当前没有待初始化股票"
+                if not retry_errors
+                else "当前没有需要重试的错误股票"
+            )
+            run.finished_at = datetime.utcnow()
+            db.commit()
             return []
 
         results = []
         errors = []
-        workers = max(1, int(getattr(provider, "max_workers", 1)))
+        total = len(rows)
 
-        def one(r):
+        for idx, r in enumerate(rows.itertuples(index=False), start=1):
             code = str(r.code).zfill(6)
-            return code, provider.history(code, start, end)
+            run.message = (
+                f"进度 {idx - 1}/{total}；当前 {code}；"
+                f"单股硬超时 {timeout_seconds}s"
+            )
+            db.commit()
 
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(one, r): str(r.code).zfill(6) for r in rows.itertuples(index=False)}
-            for fut in as_completed(futs):
-                code = futs[fut]
-                state = db.get(BootstrapStock, code) or BootstrapStock(code=code)
-                if state not in db:
-                    db.add(state)
-                try:
-                    c, frame = fut.result()
-                    n = upsert_bars(db, c, frame)
-                    if n <= 0:
-                        raise RuntimeError("历史接口返回0条有效日线")
-                    state.status = "ok"; state.row_count = n; state.message = ""
-                    results.append((c, n))
-                except Exception as e:
-                    state.status = "error"; state.message = str(e)[:1000]
-                    errors.append(f"{code}: {e}")
-                state.updated_at = datetime.utcnow()
-                db.commit()
+            state = db.get(BootstrapStock, code) or BootstrapStock(code=code)
+            if state not in db:
+                db.add(state)
 
-        run.success_count = len(results)
-        run.failed_count = len(errors)
+            try:
+                frame = _history_with_timeout(code, start, end, timeout_seconds)
+                n = upsert_bars(db, code, frame)
+                if n <= 0:
+                    raise RuntimeError("历史接口返回0条有效日线")
+
+                state.status = "ok"
+                state.row_count = n
+                state.message = ""
+                results.append((code, n))
+                run.success_count += 1
+                run.message = (
+                    f"进度 {idx}/{total}；刚完成 {code}；"
+                    f"成功 {run.success_count}；失败 {run.failed_count}"
+                )
+            except Exception as e:
+                msg = f"{type(e).__name__}: {e}"[:1000]
+                state.status = "error"
+                state.message = msg
+                errors.append(f"{code}: {msg}")
+                run.failed_count += 1
+                run.message = (
+                    f"进度 {idx}/{total}；{code} 已隔离到错误队列；"
+                    f"成功 {run.success_count}；失败 {run.failed_count}；{msg[:240]}"
+                )
+
+            state.updated_at = datetime.utcnow()
+            db.commit()
+
         run.status = "ok" if not errors else "partial"
-        run.message = "\n".join(errors[:100])
-        run.finished_at = datetime.utcnow(); db.commit()
+        summary = (
+            f"批次完成：成功 {run.success_count}/{total}，失败 {run.failed_count}。"
+            "失败股票已隔离，不会阻塞下一批。"
+        )
+        if errors:
+            summary += "\n" + "\n".join(errors[:50])
+        run.message = summary
+        run.finished_at = datetime.utcnow()
+        db.commit()
         return results
     except Exception as e:
-        run.status = "error"; run.message = str(e); run.finished_at = datetime.utcnow(); db.commit()
+        run.status = "error"
+        run.message = f"{type(e).__name__}: {e}"
+        run.finished_at = datetime.utcnow()
+        db.commit()
         raise
 
 

@@ -18,7 +18,10 @@ from .services.repository import latest_trade_date, latest_prices
 from .services.strategy_service import run_full_scan
 from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.chart_service import build_stock_chart
-from .services.data_update import data_stats, bootstrap_batch, sync_daily_public, scan_readiness
+from .services.data_update import (
+    data_stats, bootstrap_batch, sync_daily_public, scan_readiness,
+    recover_interrupted_runs,
+)
 
 BASE = Path(__file__).resolve().parent
 app = FastAPI(title=settings.app_name, version=settings.web_version)
@@ -26,10 +29,10 @@ app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=BASE / "templates")
 
 
-def _bg_bootstrap(limit: int):
+def _bg_bootstrap(limit: int, retry_errors: bool = False):
     db = SessionLocal()
     try:
-        bootstrap_batch(db, limit=limit)
+        bootstrap_batch(db, limit=limit, retry_errors=retry_errors)
     finally:
         db.close()
 
@@ -121,6 +124,11 @@ def _db_storage_stats(db, stats: dict) -> dict:
 @app.on_event("startup")
 def startup():
     init_db()
+    db = SessionLocal()
+    try:
+        recover_interrupted_runs(db)
+    finally:
+        db.close()
 
 
 @app.middleware("http")
@@ -347,17 +355,54 @@ def data_page(request: Request, db=Depends(db_session)):
     errors = db.execute(
         select(BootstrapStock).where(BootstrapStock.status == "error").order_by(BootstrapStock.updated_at.desc()).limit(20)
     ).scalars().all()
+    bootstrap_busy = bool(db.execute(
+        select(func.count(DataUpdateRun.id)).where(
+            DataUpdateRun.status == "running",
+            DataUpdateRun.provider.like("%-bootstrap%"),
+        )
+    ).scalar_one() or 0)
     return templates.TemplateResponse("data.html", {
         "request": request, "stats": stats, "update": update, "errors": errors,
         "provider": settings.data_provider, "bootstrap_start": settings.bootstrap_start_date,
         "batch_size": settings.bootstrap_batch_size, "storage": storage,
+        "bootstrap_busy": bootstrap_busy,
+        "stock_timeout": settings.bootstrap_stock_timeout_seconds,
     })
 
 
 @app.post("/admin/bootstrap")
-def admin_bootstrap(background_tasks: BackgroundTasks, limit: int = Form(100)):
+def admin_bootstrap(
+    background_tasks: BackgroundTasks,
+    limit: int = Form(100),
+    db=Depends(db_session),
+):
     limit = max(1, min(int(limit), 500))
-    background_tasks.add_task(_bg_bootstrap, limit)
+    busy = bool(db.execute(
+        select(func.count(DataUpdateRun.id)).where(
+            DataUpdateRun.status == "running",
+            DataUpdateRun.provider.like("%-bootstrap%"),
+        )
+    ).scalar_one() or 0)
+    if not busy:
+        background_tasks.add_task(_bg_bootstrap, limit, False)
+    return RedirectResponse("/data", 303)
+
+
+@app.post("/admin/bootstrap-errors")
+def admin_bootstrap_errors(
+    background_tasks: BackgroundTasks,
+    limit: int = Form(20),
+    db=Depends(db_session),
+):
+    limit = max(1, min(int(limit), 100))
+    busy = bool(db.execute(
+        select(func.count(DataUpdateRun.id)).where(
+            DataUpdateRun.status == "running",
+            DataUpdateRun.provider.like("%-bootstrap%"),
+        )
+    ).scalar_one() or 0)
+    if not busy:
+        background_tasks.add_task(_bg_bootstrap, limit, True)
     return RedirectResponse("/data", 303)
 
 

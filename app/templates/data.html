@@ -5,7 +5,7 @@
   <div>
     <span class="eyebrow">PUBLIC DATA PIPELINE</span>
     <h1>数据管理</h1>
-    <p>无需 Tushare Token。历史初始化优先使用 BaoStock 不复权日线；日常盘后使用 AKShare 全市场快照。V2.1.2 增加数据库容量实测与全市场容量预测。</p>
+    <p>无需 Tushare Token。历史初始化优先使用 BaoStock 不复权日线；日常盘后使用 AKShare 全市场快照。V2.1.3 增加单股硬超时、实时进度、错误隔离与僵尸任务恢复；数据库容量预测继续保留。</p>
   </div>
   <div class="status">
     <div>数据源 <b>{{ provider }}</b></div>
@@ -73,17 +73,23 @@
   <section class="panel">
     <span class="eyebrow">FIRST BOOTSTRAP</span>
     <h2>历史初始化（可断点续传）</h2>
-    <p class="muted">每次只处理一批股票，完成状态写入数据库；Render 重启或重新部署后仍会从未完成股票继续。测试库可继续按 100 只一批验证；正式扫描需达到完整性门。</p>
+    <p class="muted">V2.1.3 每只股票最多等待 {{ stock_timeout }} 秒；超时或失败会隔离到错误队列，正常股票继续向后。任务进度逐只写入数据库，Render 重启后旧 running 任务会自动标记 interrupted。</p>
     <form method="post" action="/admin/bootstrap" class="toolbar compact-toolbar">
-      <label>本批股票数<input name="limit" type="number" value="{{ batch_size }}" min="1" max="500"></label>
-      <button type="submit">后台初始化下一批</button>
+      <label>本批股票数<input name="limit" type="number" value="{{ batch_size }}" min="1" max="500" {% if bootstrap_busy %}disabled{% endif %}></label>
+      <button type="submit" {% if bootstrap_busy %}disabled{% endif %}>{{ '初始化任务运行中' if bootstrap_busy else '后台初始化下一批' }}</button>
     </form>
+    {% if stats.bootstrap_errors %}
+    <form method="post" action="/admin/bootstrap-errors" class="toolbar compact-toolbar" style="margin-top:12px">
+      <label>错误重试数<input name="limit" type="number" value="20" min="1" max="100" {% if bootstrap_busy %}disabled{% endif %}></label>
+      <button type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试错误队列</button>
+    </form>
+    {% endif %}
   </section>
 
   <section class="panel">
     <span class="eyebrow">POST-CLOSE DAILY</span>
     <h2>收盘后更新 + ABC扫描</h2>
-    <p class="muted">V2.1.2 仍仅在“今天确为A股交易日 + 北京时间16:10以后”才允许把实时快照写成当日日线。盘中、周末、节假日会安全跳过；历史覆盖不足时只更新数据，不运行正式扫描。</p>
+    <p class="muted">V2.1.3 仍仅在“今天确为A股交易日 + 北京时间16:10以后”才允许把实时快照写成当日日线。盘中、周末、节假日会安全跳过；历史覆盖不足时只更新数据，不运行正式扫描。</p>
     <form method="post" action="/admin/daily-update">
       <button type="submit" class="primary">立即执行一次安全盘后更新</button>
     </form>
@@ -94,13 +100,14 @@
 {% if update %}
 <section class="note">
   <b>最近数据任务：</b>{{ update.status }} ｜ {{ update.provider }} ｜ {{ update.start_date or '-' }} → {{ update.end_date or '-' }} ｜ 成功 {{ update.success_count }}/{{ update.stock_count }} ｜ 失败 {{ update.failed_count }}
+  {% if update.status == 'running' %}<span class="ok"> ｜ 正在执行，可刷新页面查看逐只进度</span>{% endif %}
   {% if update.message %}<pre>{{ update.message }}</pre>{% endif %}
 </section>
 {% endif %}
 
 {% if errors %}
 <section>
-  <div class="section-head"><div><span class="eyebrow">RETRY QUEUE</span><h2>最近初始化错误</h2></div></div>
+  <div class="section-head"><div><span class="eyebrow">RETRY QUEUE</span><h2>最近初始化错误</h2><p class="muted">这些股票已从正常队列隔离，不会阻塞后续初始化；可使用上方“重试错误队列”单独处理。</p></div></div>
   <div class="table-wrap"><table><thead><tr><th>代码</th><th>状态</th><th>行数</th><th>更新时间</th><th>信息</th></tr></thead><tbody>
   {% for e in errors %}<tr><td>{{e.code}}</td><td>{{e.status}}</td><td>{{e.row_count}}</td><td>{{e.updated_at}}</td><td>{{e.message}}</td></tr>{% endfor %}
   </tbody></table></div>
