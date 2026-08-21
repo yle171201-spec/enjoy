@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request, Depends, Form, Query, HTTPException, Backg
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, func, distinct
+from sqlalchemy import select, func, distinct, text
 
 from .config import settings
 from .db import init_db, db_session, SessionLocal
@@ -42,6 +42,80 @@ def _bg_daily_and_scan():
             run_full_scan(db)  # integrity gate inside run_full_scan blocks partial-universe scans
     finally:
         db.close()
+
+
+def _db_storage_stats(db, stats: dict) -> dict:
+    # Measure current DB usage and estimate full-universe bootstrap size.
+    capacity_mb = max(0, int(settings.database_capacity_mb))
+    capacity_bytes = capacity_mb * 1024 * 1024 if capacity_mb else 0
+    dialect = db.get_bind().dialect.name
+    used_bytes = 0
+    daily_bytes = 0
+    error = ""
+
+    try:
+        if dialect == "postgresql":
+            used_bytes = int(
+                db.execute(text("SELECT pg_database_size(current_database())")).scalar_one() or 0
+            )
+            daily_bytes = int(
+                db.execute(text("SELECT pg_total_relation_size('daily_bars')")).scalar_one() or 0
+            )
+        elif dialect == "sqlite":
+            page_size = int(db.execute(text("PRAGMA page_size")).scalar_one() or 0)
+            page_count = int(db.execute(text("PRAGMA page_count")).scalar_one() or 0)
+            used_bytes = page_size * page_count
+    except Exception as e:
+        error = str(e)
+
+    projected_bytes = None
+    projected_rows = None
+    done = int(stats.get("bootstrap_done") or 0)
+    total = int(stats.get("active_nonst") or 0)
+    bars = int(stats.get("bars") or 0)
+
+    if used_bytes > 0 and done > 0 and total > done and bars > 0:
+        projected_rows = int(round(bars * total / done))
+        if daily_bytes > 0:
+            bytes_per_bar = daily_bytes / bars
+            projected_bytes = used_bytes + max(0, projected_rows - bars) * bytes_per_bar
+        else:
+            projected_bytes = used_bytes * total / done
+    elif used_bytes > 0 and done > 0 and total and done >= total:
+        projected_bytes = float(used_bytes)
+        projected_rows = bars
+
+    used_pct = (used_bytes / capacity_bytes) if capacity_bytes else None
+    projected_pct = (
+        projected_bytes / capacity_bytes
+        if (capacity_bytes and projected_bytes is not None)
+        else None
+    )
+
+    level = "UNKNOWN"
+    level_cn = "等待估算"
+    if projected_pct is not None:
+        if (used_pct is not None and used_pct >= 0.85) or projected_pct > 0.95:
+            level, level_cn = "HIGH", "高风险"
+        elif projected_pct > 0.80:
+            level, level_cn = "CAUTION", "注意"
+        else:
+            level, level_cn = "SAFE", "安全"
+
+    return {
+        "available": used_bytes > 0,
+        "dialect": dialect,
+        "capacity_mb": capacity_mb,
+        "used_mb": used_bytes / (1024 * 1024) if used_bytes else 0.0,
+        "used_pct": used_pct,
+        "daily_mb": daily_bytes / (1024 * 1024) if daily_bytes else 0.0,
+        "projected_mb": projected_bytes / (1024 * 1024) if projected_bytes is not None else None,
+        "projected_pct": projected_pct,
+        "projected_rows": projected_rows,
+        "level": level,
+        "level_cn": level_cn,
+        "error": error,
+    }
 
 
 @app.on_event("startup")
@@ -268,6 +342,7 @@ def portfolio_run(
 @app.get("/data", response_class=HTMLResponse)
 def data_page(request: Request, db=Depends(db_session)):
     stats = data_stats(db)
+    storage = _db_storage_stats(db, stats)
     update = db.execute(select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)).scalar_one_or_none()
     errors = db.execute(
         select(BootstrapStock).where(BootstrapStock.status == "error").order_by(BootstrapStock.updated_at.desc()).limit(20)
@@ -275,7 +350,7 @@ def data_page(request: Request, db=Depends(db_session)):
     return templates.TemplateResponse("data.html", {
         "request": request, "stats": stats, "update": update, "errors": errors,
         "provider": settings.data_provider, "bootstrap_start": settings.bootstrap_start_date,
-        "batch_size": settings.bootstrap_batch_size,
+        "batch_size": settings.bootstrap_batch_size, "storage": storage,
     })
 
 

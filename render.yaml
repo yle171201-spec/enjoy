@@ -29,6 +29,8 @@ services:
         value: "1"
       - key: DATA_PROVIDER
         value: public
+      - key: DATABASE_CAPACITY_MB
+        value: "1024"
       - key: BOOTSTRAP_START_DATE
         value: "2025-01-01"
       - key: BOOTSTRAP_BATCH_SIZE

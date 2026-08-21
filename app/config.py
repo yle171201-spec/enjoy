@@ -14,6 +14,7 @@ class Settings:
     app_password: str = _env("APP_PASSWORD", "change-me")
     session_secret: str = _env("SESSION_SECRET", "dev-secret-change-me")
     database_url: str = _env("DATABASE_URL", "sqlite:///./data/abc_strategy.db")
+    database_capacity_mb: int = int(_env("DATABASE_CAPACITY_MB", "1024"))
     data_provider: str = _env("DATA_PROVIDER", "akshare").lower()
     tushare_token: str = _env("TUSHARE_TOKEN", "")
     strategy_start_date: str = _env("STRATEGY_START_DATE", "2022-01-01")
@@ -26,7 +27,7 @@ class Settings:
     calendar_gap_check_days: int = int(_env("CALENDAR_GAP_CHECK_DAYS", "420"))
     default_n_days: int = int(_env("DEFAULT_N_DAYS", "20"))
     slippage_bps: float = float(_env("SLIPPAGE_BPS", "0"))
-    web_version: str = "V2.1.1"
+    web_version: str = "V2.1.2"
     strategy_version: str = "V18"
     cookie_secure: bool = _env("COOKIE_SECURE", "0").lower() in {"1","true","yes","on"}
 

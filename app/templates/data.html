@@ -5,7 +5,7 @@
   <div>
     <span class="eyebrow">PUBLIC DATA PIPELINE</span>
     <h1>数据管理</h1>
-    <p>无需 Tushare Token。历史初始化优先使用 BaoStock 不复权日线；日常盘后使用 AKShare 全市场快照。V2.1.1 增加收盘时间、交易日历与历史覆盖率三重完整性门。</p>
+    <p>无需 Tushare Token。历史初始化优先使用 BaoStock 不复权日线；日常盘后使用 AKShare 全市场快照。V2.1.2 增加数据库容量实测与全市场容量预测。</p>
   </div>
   <div class="status">
     <div>数据源 <b>{{ provider }}</b></div>
@@ -34,6 +34,41 @@
   {% if stats.latest %}<br>最新交易日 {{ stats.latest }} 共 {{ '{:,}'.format(stats.latest_rows) }} 行。{% endif %}
 </section>
 
+<section class="panel">
+  <span class="eyebrow">DATABASE CAPACITY</span>
+  <h2>数据库容量监控</h2>
+  {% if storage.available %}
+  <div class="metrics">
+    <div>
+      <span>数据库已用</span>
+      <b>{{ '{:.1f}'.format(storage.used_mb) }} MB{% if storage.capacity_mb %} / {{ storage.capacity_mb }} MB{% endif %}</b>
+    </div>
+    <div>
+      <span>当前使用率</span>
+      <b>{{ '{:.1%}'.format(storage.used_pct) if storage.used_pct is not none else '未配置上限' }}</b>
+    </div>
+    <div>
+      <span>全市场预计</span>
+      <b>{{ ('{:.0f}'.format(storage.projected_mb) ~ ' MB') if storage.projected_mb is not none else '等待更多样本' }}</b>
+    </div>
+    <div>
+      <span>预计占用率</span>
+      <b>{{ '{:.1%}'.format(storage.projected_pct) if storage.projected_pct is not none else '-' }}</b>
+    </div>
+    <div>
+      <span>容量判断</span>
+      <b class="{{ 'ok' if storage.level == 'SAFE' else 'warn-text' }}">{{ storage.level_cn }}</b>
+    </div>
+  </div>
+  <p class="muted">
+    预测基于当前已完成 {{ '{:,}'.format(stats.bootstrap_done) }} 只股票、{{ '{:,}'.format(stats.bars) }} 条日线的真实数据库占用；
+    随初始化样本增加会自动修正。安全表示预计低于 80%，注意为 80%–95%，高风险为预计超过 95% 或当前已用超过 85%。
+  </p>
+  {% else %}
+  <p class="muted">暂时无法读取数据库容量{% if storage.error %}：{{ storage.error }}{% endif %}</p>
+  {% endif %}
+</section>
+
 <div class="compare-grid">
   <section class="panel">
     <span class="eyebrow">FIRST BOOTSTRAP</span>
@@ -48,7 +83,7 @@
   <section class="panel">
     <span class="eyebrow">POST-CLOSE DAILY</span>
     <h2>收盘后更新 + ABC扫描</h2>
-    <p class="muted">V2.1.1 仅在“今天确为A股交易日 + 北京时间16:10以后”才允许把实时快照写成当日日线。盘中、周末、节假日会安全跳过；历史覆盖不足时只更新数据，不运行正式扫描。</p>
+    <p class="muted">V2.1.2 仍仅在“今天确为A股交易日 + 北京时间16:10以后”才允许把实时快照写成当日日线。盘中、周末、节假日会安全跳过；历史覆盖不足时只更新数据，不运行正式扫描。</p>
     <form method="post" action="/admin/daily-update">
       <button type="submit" class="primary">立即执行一次安全盘后更新</button>
     </form>
