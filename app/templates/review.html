@@ -1,44 +1,121 @@
 {% extends "base.html" %}
-{% block title %}历史复盘{% endblock %}
+{% block title %}策略体检与历史复盘{% endblock %}
 {% block content %}
-<section class="hero review-hero">
+<section class="hero workbench-hero">
   <div>
-    <span class="eyebrow">HISTORICAL REVIEW CENTER</span>
-    <h1>V18 历史复盘</h1>
-    <p>把完整复现得到的历史正式信号当作“病例库”逐笔检查：看买点、后续K线、MFE/MAE、退出结果，并保存你的人工评价。这里不改变任何策略规则。</p>
+    <span class="eyebrow">STRATEGY HEALTH + CASE REVIEW</span>
+    <h1>V18 策略体检</h1>
+    <p>先比较 A / B / C 及两两组合，再进入单笔病例看结构。这里的组合统计是<strong>信号级 Close-entry 历史结果</strong>，用于判断信号质量；真实资金重叠与仓位竞争仍以“执行回测 / 账户回测”为准。</p>
   </div>
   <div class="status">
-    <div>历史信号 <b>{{ summary.total }} 笔</b></div>
-    <div>结构分布 <b>A{{summary.A}} / B{{summary.B}} / C{{summary.C}}</b></div>
-    <div>人工已复盘 <b>{{summary.reviewed}} / {{summary.total}}</b></div>
-    <div>当前筛选 <b>{{filtered_count}} 笔</b></div>
+    <div>历史样本 <b>{{ all_summary.total }} 笔</b></div>
+    <div>结构 <b>A{{all_summary.A}} / B{{all_summary.B}} / C{{all_summary.C}}</b></div>
+    <div>人工复盘 <b>{{all_summary.reviewed}} / {{all_summary.total}}</b></div>
+    <div>当前组合 <b>{{summary.label}}</b></div>
   </div>
 </section>
 
-<div class="metrics review-summary">
-  <div><span>历史胜率</span><b>{{'%.1f%%'|format(summary.win_rate*100) if summary.win_rate is not none else '-'}}</b></div>
-  <div><span>平均退出收益</span><b class="{{'pos' if summary.avg_ret is not none and summary.avg_ret>0 else 'neg' if summary.avg_ret is not none else ''}}">{{'%.1f%%'|format(summary.avg_ret*100) if summary.avg_ret is not none else '-'}}</b></div>
+<nav class="combo-tabs" aria-label="策略组合">
+{% for key,label,engines in combos %}
+  <a href="/review?combo={{key}}" class="{{'active' if filters.combo==key else ''}}">
+    <span>{{label}}</span>
+    {% set m = (matrix | selectattr('key','equalto',key) | list | first) %}
+    <small>{{m.total}}笔{% if m.sample_note %} · {{m.sample_note}}{% endif %}</small>
+  </a>
+{% endfor %}
+</nav>
+
+<section class="strategy-kpi-grid">
+  <div><span>样本</span><b>{{summary.total}}</b><small>{{summary.sample_note or '可用于横向比较'}}</small></div>
+  <div><span>胜率</span><b>{{'%.1f%%'|format(summary.win_rate*100) if summary.win_rate is not none else '-'}}</b></div>
+  <div><span>平均收益</span><b class="{{'pos' if summary.avg_ret is not none and summary.avg_ret>0 else 'neg' if summary.avg_ret is not none else ''}}">{{'%+.1f%%'|format(summary.avg_ret*100) if summary.avg_ret is not none else '-'}}</b></div>
+  <div><span>收益中位数</span><b class="{{'pos' if summary.median_ret is not none and summary.median_ret>0 else 'neg' if summary.median_ret is not none else ''}}">{{'%+.1f%%'|format(summary.median_ret*100) if summary.median_ret is not none else '-'}}</b></div>
   <div><span>Profit Factor</span><b>{{'%.2f'|format(summary.profit_factor) if summary.profit_factor is not none else '-'}}</b></div>
-  <div><span>平均 MFE</span><b class="pos">{{'%.1f%%'|format(summary.avg_mfe*100) if summary.avg_mfe is not none else '-'}}</b></div>
-  <div><span>平均 MAE</span><b class="neg">{{'%.1f%%'|format(summary.avg_mae*100) if summary.avg_mae is not none else '-'}}</b></div>
-  <div><span>复盘进度</span><b>{{'%.0f%%'|format(summary.reviewed/summary.total*100) if summary.total else '0%'}}</b></div>
+  <div><span>盈亏比</span><b>{{'%.2f'|format(summary.payoff) if summary.payoff is not none else '-'}}</b></div>
+  <div><span>平均 MFE</span><b class="pos">{{'%+.1f%%'|format(summary.avg_mfe*100) if summary.avg_mfe is not none else '-'}}</b></div>
+  <div><span>平均 MAE</span><b class="neg">{{'%+.1f%%'|format(summary.avg_mae*100) if summary.avg_mae is not none else '-'}}</b></div>
+  <div><span>MFE兑现率</span><b>{{'%.1f%%'|format(summary.capture_rate*100) if summary.capture_rate is not none else '-'}}</b><small>总正收益 / 总MFE</small></div>
+</section>
+
+<section class="panel strategy-matrix-panel">
+  <div class="section-head">
+    <div>
+      <span class="eyebrow">COMBINATION MATRIX</span>
+      <h2>A / B / C 组合横向比较</h2>
+      <p>两两组合是把对应信号放进同一信号池比较，不等于账户同时执行后的净值。</p>
+    </div>
+    <div class="actions">
+      <a class="btn ghost" href="/backtest">执行回测</a>
+      <a class="btn ghost" href="/portfolio">账户回测</a>
+    </div>
+  </div>
+  <div class="strategy-table-wrap">
+    <table class="strategy-table">
+      <thead><tr><th>组合</th><th>样本</th><th>胜率</th><th>平均</th><th>中位数</th><th>PF</th><th>盈亏比</th><th>MFE</th><th>MAE</th><th>兑现率</th></tr></thead>
+      <tbody>
+      {% for m in matrix %}
+        <tr class="{{'selected' if m.key==filters.combo else ''}} {{'small-sample' if m.sample_note else ''}}">
+          <td><a href="/review?combo={{m.key}}"><b>{{m.label}}</b>{% if m.sample_note %}<small>{{m.sample_note}}</small>{% endif %}</a></td>
+          <td>{{m.total}}</td>
+          <td>{{'%.1f%%'|format(m.win_rate*100) if m.win_rate is not none else '-'}}</td>
+          <td class="{{'pos' if m.avg_ret is not none and m.avg_ret>0 else 'neg' if m.avg_ret is not none else ''}}">{{'%+.1f%%'|format(m.avg_ret*100) if m.avg_ret is not none else '-'}}</td>
+          <td class="{{'pos' if m.median_ret is not none and m.median_ret>0 else 'neg' if m.median_ret is not none else ''}}">{{'%+.1f%%'|format(m.median_ret*100) if m.median_ret is not none else '-'}}</td>
+          <td>{{'%.2f'|format(m.profit_factor) if m.profit_factor is not none else '-'}}</td>
+          <td>{{'%.2f'|format(m.payoff) if m.payoff is not none else '-'}}</td>
+          <td class="pos">{{'%+.1f%%'|format(m.avg_mfe*100) if m.avg_mfe is not none else '-'}}</td>
+          <td class="neg">{{'%+.1f%%'|format(m.avg_mae*100) if m.avg_mae is not none else '-'}}</td>
+          <td>{{'%.1f%%'|format(m.capture_rate*100) if m.capture_rate is not none else '-'}}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<div class="strategy-two-col">
+  <section class="panel">
+    <span class="eyebrow">ENGINE CONTRIBUTION</span>
+    <h2>A / B / C 信号收益贡献</h2>
+    <p class="muted">这里是历史单笔收益简单求和，仅用于看哪个引擎贡献/拖累最多，不代表真实账户收益。</p>
+    <div class="contribution-list">
+    {% for c in contribution %}
+      <div class="contribution-row engine-{{c.engine}}">
+        <div><span class="tag tag-{{c.engine}}">{{c.engine}}</span><b>{{c.total}}笔</b></div>
+        <div class="contribution-track"><i style="width:{{c.bar_pct}}%" class="{{'positive' if c.net>=0 else 'negative'}}"></i></div>
+        <strong class="{{'pos' if c.net>=0 else 'neg'}}">{{'%+.1f%%'|format(c.net*100)}}</strong>
+        <small>盈利池 {{'+%.1f%%'|format(c.gross_profit*100)}} / 亏损池 {{'-%.1f%%'|format(c.gross_loss*100)}}</small>
+      </div>
+    {% endfor %}
+    </div>
+  </section>
+
+  <section class="panel">
+    <span class="eyebrow">CASE DIAGNOSIS</span>
+    <h2>{{summary.label}} 的典型病例</h2>
+    <div class="diagnosis-grid">
+    {% for d in diagnosis_summary %}
+      <a href="/review?combo={{filters.combo}}&diagnosis={{d.key}}" class="diagnosis-card {{'active' if filters.diagnosis==d.key else ''}}">
+        <b>{{d.count}}</b><span>{{d.label}}</span><small>{{d.desc}}</small>
+      </a>
+    {% endfor %}
+    </div>
+  </section>
 </div>
 
 <form class="toolbar review-toolbar" method="get" action="/review">
-  <label>结构
-    <select name="engine">
-      <option value="ALL" {{'selected' if filters.engine=='ALL' else ''}}>全部 A/B/C</option>
-      <option value="A" {{'selected' if filters.engine=='A' else ''}}>A 主仓</option>
-      <option value="B" {{'selected' if filters.engine=='B' else ''}}>B 主仓</option>
-      <option value="C" {{'selected' if filters.engine=='C' else ''}}>C 卫星</option>
-    </select>
-  </label>
+  <input type="hidden" name="combo" value="{{filters.combo}}">
   <label>结果
     <select name="outcome">
       <option value="ALL" {{'selected' if filters.outcome=='ALL' else ''}}>全部结果</option>
       <option value="WIN" {{'selected' if filters.outcome=='WIN' else ''}}>盈利</option>
       <option value="LOSS" {{'selected' if filters.outcome=='LOSS' else ''}}>亏损/持平</option>
       <option value="OPEN" {{'selected' if filters.outcome=='OPEN' else ''}}>未退出</option>
+    </select>
+  </label>
+  <label>病例
+    <select name="diagnosis">
+      <option value="ALL" {{'selected' if filters.diagnosis=='ALL' else ''}}>全部病例</option>
+      {% for key,label,desc in diagnoses %}<option value="{{key}}" {{'selected' if filters.diagnosis==key else ''}}>{{label}}</option>{% endfor %}
     </select>
   </label>
   <label>人工评价
@@ -58,36 +135,45 @@
       <option value="UNREVIEWED" {{'selected' if filters.sort=='UNREVIEWED' else ''}}>未复盘优先</option>
     </select>
   </label>
-  <button type="submit">应用筛选</button>
-  <a class="btn ghost" href="/review">清空</a>
+  <button type="submit">应用</button>
+  <a class="btn ghost" href="/review?combo={{filters.combo}}">清空筛选</a>
+  <span class="toolbar-count">{{filtered_count}} 笔</span>
 </form>
 
 {% if rows %}
-<div class="review-grid">
+<div class="case-library">
 {% for r in rows %}
-  <article class="review-card engine-{{r.engine}}">
-    <a class="review-card-main" href="/review/{{r.id}}">
-      <div class="review-card-top">
-        <div>
-          <span class="tag tag-{{r.engine}}">{{r.engine}}</span>
-          <strong>{{r.code}} {{r.name}}</strong>
-          <small>{{r.signal_date}}</small>
-        </div>
-        <div class="review-rating {{'rated' if r.reviewed else ''}}">{{r.rating if r.reviewed else '待复盘'}}</div>
+  <article class="case-row engine-{{r.engine}}">
+    <a class="case-row-main" href="/review/{{r.id}}">
+      <div class="case-identity">
+        <span class="tag tag-{{r.engine}}">{{r.engine}}</span>
+        <div><strong>{{r.code}} {{r.name}}</strong><small>{{r.signal_date}}{% if r.exit_date %} → {{r.exit_date}}{% endif %}</small></div>
       </div>
-      <div class="review-card-metrics">
-        <span>最终 <b class="{{'pos' if r.exit_ret is not none and r.exit_ret>0 else 'neg' if r.exit_ret is not none else ''}}">{{'%.1f%%'|format(r.exit_ret*100) if r.exit_ret is not none else '-'}}</b></span>
-        <span>MFE <b class="pos">{{'%.1f%%'|format(r.metrics.mfe*100) if r.metrics.mfe is not none else '-'}}</b></span>
-        <span>MAE <b class="neg">{{'%.1f%%'|format(r.metrics.mae*100) if r.metrics.mae is not none else '-'}}</b></span>
+      <div class="case-spark">
+        {% if r.metrics.spark_points %}
+        <svg viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
+          <line x1="0" y1="14" x2="100" y2="14"></line>
+          <polyline points="{{r.metrics.spark_points}}"></polyline>
+        </svg>
+        {% endif %}
+      </div>
+      <div class="case-numbers">
+        <span>最终 <b class="{{'pos' if r.exit_ret is not none and r.exit_ret>0 else 'neg' if r.exit_ret is not none else ''}}">{{'%+.1f%%'|format(r.exit_ret*100) if r.exit_ret is not none else '-'}}</b></span>
+        <span>MFE <b class="pos">{{'%+.1f%%'|format(r.metrics.mfe*100) if r.metrics.mfe is not none else '-'}}</b></span>
+        <span>MAE <b class="neg">{{'%+.1f%%'|format(r.metrics.mae*100) if r.metrics.mae is not none else '-'}}</b></span>
         <span>持有 <b>{{r.metrics.hold_bars if r.metrics.hold_bars is not none else '-'}}日</b></span>
       </div>
-      {% if r.tags %}<div class="review-tags">{% for t in r.tags %}<span>{{t}}</span>{% endfor %}</div>{% endif %}
-      <div class="review-card-foot"><span>{{r.exit_reason or '尚未退出'}}</span><b>打开K线复盘 →</b></div>
+      <div class="case-diagnosis">
+        {% for x in r.diagnosis_labels[:2] %}<span>{{x}}</span>{% endfor %}
+        {% if not r.diagnosis_labels %}<span class="neutral">常规病例</span>{% endif %}
+      </div>
+      <div class="case-review-state {{'rated' if r.reviewed else ''}}">{{r.rating if r.reviewed else '待复盘'}}</div>
+      <b class="case-open">看K线 →</b>
     </a>
   </article>
 {% endfor %}
 </div>
 {% else %}
-<div class="empty"><b>当前筛选没有历史信号。</b><span>可以清空筛选重新查看全部 V18 历史事件。</span></div>
+<div class="empty"><b>当前筛选没有历史信号。</b><span>可以清空病例/结果筛选重新查看。</span></div>
 {% endif %}
 {% endblock %}

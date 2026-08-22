@@ -1,74 +1,87 @@
 {% extends "base.html" %}
 {% block title %}复盘 {{case.row.code}}{% endblock %}
 {% block content %}
-<section class="review-case-head">
+<section class="case-workbench-head">
   <div>
-    <div class="review-breadcrumb"><a href="/review">历史复盘</a><span>›</span><span>第 {{case.position}} / {{case.total}} 笔</span></div>
-    <div class="review-case-title">
-      <span class="tag tag-{{case.row.engine}}">{{case.row.engine}} 信号</span>
+    <div class="review-breadcrumb"><a href="/review">策略体检</a><span>›</span><span>第 {{case.position}} / {{case.total}} 笔</span></div>
+    <div class="case-title-line">
+      <span class="tag tag-{{case.row.engine}}">{{case.row.engine}}</span>
       <h1>{{case.row.code}} {{case.row.name}}</h1>
       <span>{{case.row.signal_date}}</span>
     </div>
-    <p>图中以 V18 历史“信号日收盘价”为主锚点。次日开盘仅作为 NEXT_OPEN 执行参考，不与 Close-entry 历史退出收益混用。</p>
+    <div class="case-head-stats">
+      <strong class="{{'pos' if case.row.exit_ret is not none and case.row.exit_ret>0 else 'neg'}}">{{'%+.1f%%'|format(case.row.exit_ret*100) if case.row.exit_ret is not none else '-'}}</strong>
+      <span>MFE <b class="pos">{{'%+.1f%%'|format(case.row.metrics.mfe*100) if case.row.metrics.mfe is not none else '-'}}</b></span>
+      <span>MAE <b class="neg">{{'%+.1f%%'|format(case.row.metrics.mae*100) if case.row.metrics.mae is not none else '-'}}</b></span>
+      <span>{{case.row.metrics.hold_bars if case.row.metrics.hold_bars is not none else '-'}}日</span>
+      {% for x in case.row.diagnosis_labels %}<em>{{x}}</em>{% endfor %}
+    </div>
   </div>
   <div class="review-nav">
     {% if case.prev_id %}<a class="btn ghost" href="/review/{{case.prev_id}}">← 上一笔</a>{% else %}<span class="btn disabled">← 上一笔</span>{% endif %}
-    <a class="btn" href="/review">返回列表</a>
+    <a class="btn" href="/review">病例库</a>
     {% if case.next_id %}<a class="btn ghost" href="/review/{{case.next_id}}">下一笔 →</a>{% else %}<span class="btn disabled">下一笔 →</span>{% endif %}
   </div>
 </section>
 
-{% if saved %}<div class="note ok">人工复盘已保存。评价按“策略版本 + 股票 + 日期 + A/B/C”绑定，重新完整扫描后仍会保留。</div>{% endif %}
+{% if saved %}<div class="note ok">人工复盘已保存。重新完整扫描不会清空你的评价。</div>{% endif %}
 
-<div class="review-case-layout">
-  <section class="review-chart-panel">
-    <div id="review-chart" class="chart review-chart"></div>
-    <div class="legend review-legend">
-      <span class="dot a"></span>A结构
-      <span class="dot b"></span>B结构
-      <span class="dot c"></span>C结构
-      <span class="legend-chip next">次日开盘</span>
-      <span class="legend-chip mfe">MFE</span>
-      <span class="legend-chip mae">MAE</span>
-      <span class="dot sell"></span>退出
+<section class="panel chart-workbench-panel">
+  <div class="chart-toolbar">
+    <div>
+      <span class="eyebrow">PRICE ACTION</span>
+      <h2>买点前结构 → 持有期 → 退出后走势</h2>
+    </div>
+    <div class="chart-toggles">
+      <label><input type="checkbox" id="toggle-structure" checked> 结构区</label>
+      <label><input type="checkbox" id="toggle-holding" checked> 持有期</label>
+      <label><input type="checkbox" id="toggle-excursion"> MFE / MAE</label>
+      <label><input type="checkbox" id="toggle-next"> 次日开盘</label>
+    </div>
+  </div>
+  <div id="review-chart" class="chart review-chart-v232"></div>
+  <div class="chart-hint">实线竖标 = 信号/退出；虚线横标 = 压力/结构失效。默认隐藏 MFE/MAE 与次开，避免遮挡价格结构。</div>
+</section>
+
+<section class="trade-fact-grid">
+  <div><span>信号收盘</span><b>{{'%.2f'|format(case.row.signal_close)}}</b></div>
+  <div><span>次日开盘</span><b>{{'%.2f'|format(case.row.metrics.next_open) if case.row.metrics.next_open is not none else '-'}}</b><small>{{'%+.1f%%'|format(case.row.metrics.next_open_gap*100) if case.row.metrics.next_open_gap is not none else ''}}</small></div>
+  <div><span>结构失效</span><b>{{'%.2f'|format(case.row.fail_price)}}</b><small>风险 {{'%.1f%%'|format(case.row.risk_pct*100)}}</small></div>
+  <div><span>退出</span><b>{{case.row.exit_date or '-'}}</b><small>{{case.row.exit_reason or '-'}}</small></div>
+  <div><span>+5日</span><b class="{{'pos' if case.row.metrics.r5 is not none and case.row.metrics.r5>0 else 'neg'}}">{{'%+.1f%%'|format(case.row.metrics.r5*100) if case.row.metrics.r5 is not none else '-'}}</b></div>
+  <div><span>+10日</span><b class="{{'pos' if case.row.metrics.r10 is not none and case.row.metrics.r10>0 else 'neg'}}">{{'%+.1f%%'|format(case.row.metrics.r10*100) if case.row.metrics.r10 is not none else '-'}}</b></div>
+  <div><span>+20日</span><b class="{{'pos' if case.row.metrics.r20 is not none and case.row.metrics.r20>0 else 'neg'}}">{{'%+.1f%%'|format(case.row.metrics.r20*100) if case.row.metrics.r20 is not none else '-'}}</b></div>
+  <div><span>卖后20日</span><b class="{{'pos' if case.row.metrics.post_exit_r20 is not none and case.row.metrics.post_exit_r20>0 else 'neg'}}">{{'%+.1f%%'|format(case.row.metrics.post_exit_r20*100) if case.row.metrics.post_exit_r20 is not none else '-'}}</b><small>判断是否卖飞</small></div>
+</section>
+
+<div class="case-analysis-grid">
+  <section class="panel">
+    <span class="eyebrow">PATH QUALITY</span>
+    <h2>交易路径质量</h2>
+    <div class="path-bars">
+      <div><span>MFE 最大浮盈</span><b class="pos">{{'%+.1f%%'|format(case.row.metrics.mfe*100) if case.row.metrics.mfe is not none else '-'}}</b><i><em style="width:{{case.row.visual.mfe_bar}}%"></em></i></div>
+      <div><span>MAE 最大不利</span><b class="neg">{{'%+.1f%%'|format(case.row.metrics.mae*100) if case.row.metrics.mae is not none else '-'}}</b><i><em class="bad" style="width:{{case.row.visual.mae_bar}}%"></em></i></div>
+      <div><span>最终兑现</span><b class="{{'pos' if case.row.exit_ret is not none and case.row.exit_ret>0 else 'neg'}}">{{'%+.1f%%'|format(case.row.exit_ret*100) if case.row.exit_ret is not none else '-'}}</b><i><em class="{{'bad' if case.row.exit_ret is not none and case.row.exit_ret<0 else ''}}" style="width:{{case.row.visual.exit_bar}}%"></em></i></div>
     </div>
   </section>
 
-  <aside class="panel review-facts">
-    <span class="eyebrow">TRADE SNAPSHOT</span>
-    <h2>这笔交易发生了什么</h2>
-    <dl>
-      <dt>信号收盘</dt><dd>{{'%.2f'|format(case.row.signal_close)}}</dd>
-      <dt>次日开盘</dt><dd>{{'%.2f'|format(case.row.metrics.next_open) if case.row.metrics.next_open is not none else '-'}}</dd>
-      <dt>次开跳空</dt><dd class="{{'pos' if case.row.metrics.next_open_gap is not none and case.row.metrics.next_open_gap>0 else 'neg' if case.row.metrics.next_open_gap is not none else ''}}">{{'%.1f%%'|format(case.row.metrics.next_open_gap*100) if case.row.metrics.next_open_gap is not none else '-'}}</dd>
-      <dt>结构失效</dt><dd>{{'%.2f'|format(case.row.fail_price)}}</dd>
-      <dt>结构风险</dt><dd>{{'%.1f%%'|format(case.row.risk_pct*100)}}</dd>
-      <dt>目标仓位</dt><dd>{{'%.1f%%'|format(case.row.target_weight*100)}}</dd>
-      <dt>退出日期</dt><dd>{{case.row.exit_date or '-'}}</dd>
-      <dt>退出原因</dt><dd>{{case.row.exit_reason or '-'}}</dd>
-    </dl>
-    <div class="review-final {{'positive' if case.row.exit_ret is not none and case.row.exit_ret>0 else 'negative'}}">
-      <span>历史最终收益</span>
-      <b>{{'%+.1f%%'|format(case.row.exit_ret*100) if case.row.exit_ret is not none else '-'}}</b>
+  <section class="panel">
+    <span class="eyebrow">CASE LABELS</span>
+    <h2>系统诊断</h2>
+    <div class="case-diagnosis-large">
+      {% for x in case.row.diagnosis_labels %}<span>{{x}}</span>{% endfor %}
+      {% if not case.row.diagnosis_labels %}<span class="neutral">没有落入典型异常病例</span>{% endif %}
     </div>
-  </aside>
-</div>
-
-<div class="metrics review-path-metrics">
-  <div><span>最大浮盈 MFE</span><b class="pos">{{'%+.1f%%'|format(case.row.metrics.mfe*100) if case.row.metrics.mfe is not none else '-'}}</b><small>{{'第 %d 个交易日'|format(case.row.metrics.mfe_day) if case.row.metrics.mfe_day is not none else ''}}</small></div>
-  <div><span>最大不利 MAE</span><b class="neg">{{'%+.1f%%'|format(case.row.metrics.mae*100) if case.row.metrics.mae is not none else '-'}}</b><small>{{'第 %d 个交易日'|format(case.row.metrics.mae_day) if case.row.metrics.mae_day is not none else ''}}</small></div>
-  <div><span>+5日收盘</span><b class="{{'pos' if case.row.metrics.r5 is not none and case.row.metrics.r5>0 else 'neg' if case.row.metrics.r5 is not none else ''}}">{{'%+.1f%%'|format(case.row.metrics.r5*100) if case.row.metrics.r5 is not none else '-'}}</b></div>
-  <div><span>+10日收盘</span><b class="{{'pos' if case.row.metrics.r10 is not none and case.row.metrics.r10>0 else 'neg' if case.row.metrics.r10 is not none else ''}}">{{'%+.1f%%'|format(case.row.metrics.r10*100) if case.row.metrics.r10 is not none else '-'}}</b></div>
-  <div><span>+20日收盘</span><b class="{{'pos' if case.row.metrics.r20 is not none and case.row.metrics.r20>0 else 'neg' if case.row.metrics.r20 is not none else ''}}">{{'%+.1f%%'|format(case.row.metrics.r20*100) if case.row.metrics.r20 is not none else '-'}}</b></div>
-  <div><span>历史持有</span><b>{{case.row.metrics.hold_bars if case.row.metrics.hold_bars is not none else '-'}} 日</b></div>
+    <p class="muted">诊断只是把交易路径分类，方便集中复盘，不会修改 V18。</p>
+  </section>
 </div>
 
 <section class="panel review-form-panel">
   <div class="section-head review-form-head">
     <div>
       <span class="eyebrow">MANUAL REVIEW</span>
-      <h2>人工复盘结论</h2>
-      <p>你的人工判断独立保存，不参与 V18 公式。等复盘样本积累后，再用这些标签分析“买点问题”还是“卖出问题”。</p>
+      <h2>你的人工结论</h2>
+      <p>系统负责量化路径，你负责判断“这个买点肉眼是否值得做”。人工记录独立保存。</p>
     </div>
     <div class="review-progress">{{case.reviewed}} / {{case.total}} 已复盘</div>
   </div>
@@ -97,20 +110,34 @@
     </fieldset>
 
     <label class="review-note-label">复盘备注
-      <textarea name="note" rows="5" maxlength="4000" placeholder="例如：突破漂亮，但二次启动已经离P太远；或者买点没问题，主要是退出太早。">{{case.row.note}}</textarea>
+      <textarea name="note" rows="5" maxlength="4000" placeholder="例如：买点本身没问题，但退出发生在恐慌低点；或者回踩不充分，启动已经太远。">{{case.row.note}}</textarea>
     </label>
 
     <div class="actions review-save-actions">
-      <button type="submit">保存复盘</button>
-      <a class="btn ghost" href="/stock/{{case.row.code}}">查看该股完整结构图</a>
+      <button type="submit">保存并继续复盘</button>
+      <a class="btn ghost" href="/stock/{{case.row.code}}">该股完整结构</a>
     </div>
   </form>
 </section>
 
 <script>
+let reviewChartData = null;
+function redrawReviewCase(){
+  if(!reviewChartData) return;
+  drawKStructure('review-chart', reviewChartData, {
+    start:0,end:100,
+    showStructure:document.getElementById('toggle-structure').checked,
+    showHolding:document.getElementById('toggle-holding').checked,
+    showExcursions:document.getElementById('toggle-excursion').checked,
+    showNext:document.getElementById('toggle-next').checked
+  });
+}
 fetch('/api/review/{{case.row.id}}/chart?pre=60&post=40')
   .then(r => r.json())
-  .then(d => drawKStructure('review-chart', d, {start:0,end:100}));
+  .then(d => {reviewChartData=d; redrawReviewCase();});
+['toggle-structure','toggle-holding','toggle-excursion','toggle-next'].forEach(id=>{
+  document.getElementById(id).addEventListener('change',redrawReviewCase);
+});
 
 document.addEventListener('keydown', (e) => {
   if (e.target && ['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) return;

@@ -3,49 +3,84 @@ function markColor(kind,e){if(kind==='sell'||kind==='mfe')return '#5ee49b';if(ki
 
 function drawKStructure(id,d,opts={}){
   const el=document.getElementById(id); if(!el)return;
+  const old=echarts.getInstanceByDom(el); if(old)old.dispose();
   const c=echarts.init(el);
   const dates=d.bars.map(x=>x.date);
   const vals=d.bars.map(x=>[x.open,x.close,x.low,x.high]);
   const vols=d.bars.map(x=>x.volume);
   const ma10=d.bars.map(x=>x.ma10);
   const ma20=d.bars.map(x=>x.ma20);
-  const marks=(d.markers||[]).map(m=>({
+  const showStructure=opts.showStructure!==false;
+  const showExcursions=opts.showExcursions===true;
+  const showNext=opts.showNext===true;
+  const showHolding=opts.showHolding!==false;
+
+  const visibleMarker=(m)=>{
+    if(m.kind==='mfe'||m.kind==='mae')return showExcursions;
+    if(m.kind==='next')return showNext;
+    if(m.kind==='event')return showStructure;
+    return true;
+  };
+  const marks=(d.markers||[]).filter(visibleMarker).map(m=>({
     name:m.label,coord:[m.date,m.price],value:m.label,
-    symbol:m.kind==='fail'?'circle':(m.kind==='mfe'||m.kind==='mae')?'circle':m.kind==='next'?'diamond':'pin',symbolSize:m.kind==='fail'?18:(m.kind==='mfe'||m.kind==='mae')?26:m.kind==='next'?28:42,
+    symbol:m.kind==='fail'?'circle':(m.kind==='mfe'||m.kind==='mae')?'circle':m.kind==='next'?'diamond':'pin',
+    symbolSize:m.kind==='fail'?18:(m.kind==='mfe'||m.kind==='mae')?25:m.kind==='next'?27:40,
     itemStyle:{color:markColor(m.kind,m.engine)},
     label:{formatter:m.label,color:'#fff',fontWeight:800,fontSize:10}
   }));
-  const lineData=(d.lines||[]).map(x=>({
-    name:x.name,yAxis:x.value,lineStyle:{color:engineColor(x.engine),type:'dashed',opacity:.75,width:1.2},
-    label:{formatter:x.name,position:'insideEndTop',color:engineColor(x.engine),fontSize:10}
+
+  const horizontal=(showStructure?(d.lines||[]):[]).map(x=>({
+    name:x.name,yAxis:x.value,
+    lineStyle:{color:engineColor(x.engine),type:'dashed',opacity:.72,width:1.1},
+    label:{formatter:x.name,position:'insideEndTop',color:engineColor(x.engine),fontSize:9}
   }));
-  const areaData=(d.areas||[]).map(x=>[
-    {name:x.name,xAxis:x.start,yAxis:x.low,itemStyle:{color:engineColor(x.engine)+'18'},label:{show:true,color:engineColor(x.engine),fontSize:9}},
+  const vertical=(d.verticals||[]).map(x=>({
+    name:x.label,xAxis:x.date,
+    lineStyle:{color:markColor(x.kind,x.engine),type:'solid',opacity:.75,width:1.3},
+    label:{formatter:x.label,position:'insideEndTop',color:markColor(x.kind,x.engine),fontSize:10,fontWeight:800}
+  }));
+
+  const periodData=(showHolding?(d.periods||[]):[]).map(x=>[
+    {name:x.name,xAxis:x.start,itemStyle:{color:'rgba(74,145,202,.08)'},label:{show:true,color:'#6f98bb',fontSize:9,position:'insideTop'}},
+    {xAxis:x.end}
+  ]);
+  const structureData=(showStructure?(d.areas||[]):[]).map(x=>[
+    {name:x.name,xAxis:x.start,yAxis:x.low,itemStyle:{color:engineColor(x.engine)+'16'},label:{show:true,color:engineColor(x.engine),fontSize:9}},
     {xAxis:x.end,yAxis:x.high}
   ]);
+
   c.setOption({
     animation:false,
     backgroundColor:'transparent',
     tooltip:{trigger:'axis',axisPointer:{type:'cross'},backgroundColor:'#0b1727',borderColor:'#314b68',textStyle:{color:'#eff7ff'}},
     legend:{top:2,textStyle:{color:'#95abc3'},data:['K线','MA10','MA20','成交量']},
-    grid:[{left:52,right:20,top:38,height:'66%'},{left:52,right:20,top:'77%',height:'14%'}],
+    grid:[{left:58,right:26,top:38,height:'69%'},{left:58,right:26,top:'79%',height:'12%'}],
     xAxis:[
-      {type:'category',data:dates,boundaryGap:false,axisLine:{lineStyle:{color:'#31465f'}},axisLabel:{color:'#8198b0'}},
+      {type:'category',data:dates,boundaryGap:false,axisLine:{lineStyle:{color:'#31465f'}},axisLabel:{color:'#8198b0',hideOverlap:true}},
       {type:'category',gridIndex:1,data:dates,boundaryGap:false,axisLabel:{show:false},axisLine:{lineStyle:{color:'#31465f'}}}
     ],
     yAxis:[
       {scale:true,splitLine:{lineStyle:{color:'#17283c'}},axisLabel:{color:'#8198b0'}},
       {gridIndex:1,scale:true,splitLine:{show:false},axisLabel:{show:false}}
     ],
-    dataZoom:[{type:'inside',xAxisIndex:[0,1],start:opts.start??40,end:opts.end??100},{type:'slider',xAxisIndex:[0,1],bottom:2,height:20,start:opts.start??40,end:opts.end??100,borderColor:'#223651',textStyle:{color:'#738aa3'}}],
+    dataZoom:[
+      {type:'inside',xAxisIndex:[0,1],start:opts.start??40,end:opts.end??100},
+      {type:'slider',xAxisIndex:[0,1],bottom:2,height:18,start:opts.start??40,end:opts.end??100,borderColor:'#223651',textStyle:{color:'#738aa3'}}
+    ],
     series:[
-      {name:'K线',type:'candlestick',data:vals,itemStyle:{color:'#e95d68',color0:'#43c990',borderColor:'#e95d68',borderColor0:'#43c990'},markPoint:{data:marks},markLine:{silent:true,symbol:'none',data:lineData},markArea:{silent:true,data:areaData}},
-      {name:'MA10',type:'line',data:ma10,showSymbol:false,smooth:false,lineStyle:{width:1.2,color:'#e9edf4'}},
-      {name:'MA20',type:'line',data:ma20,showSymbol:false,smooth:false,lineStyle:{width:1.2,color:'#f1c75b'}},
+      {
+        name:'K线',type:'candlestick',data:vals,
+        itemStyle:{color:'#e95d68',color0:'#43c990',borderColor:'#e95d68',borderColor0:'#43c990'},
+        markPoint:{data:marks},
+        markLine:{silent:true,symbol:'none',data:[...horizontal,...vertical]},
+        markArea:{silent:true,data:[...periodData,...structureData]}
+      },
+      {name:'MA10',type:'line',data:ma10,showSymbol:false,lineStyle:{width:1.05,color:'#e9edf4',opacity:.9}},
+      {name:'MA20',type:'line',data:ma20,showSymbol:false,lineStyle:{width:1.05,color:'#f1c75b',opacity:.9}},
       {name:'成交量',type:'bar',xAxisIndex:1,yAxisIndex:1,data:vols,itemStyle:{color:'#315477'}}
     ]
   });
-  window.addEventListener('resize',()=>c.resize());
+  window.addEventListener('resize',()=>c.resize(),{once:true});
 }
 
 function drawEquity(id,d){

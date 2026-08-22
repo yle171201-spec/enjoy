@@ -417,17 +417,19 @@ def dashboard(request: Request, db=Depends(db_session)):
 @app.get("/review", response_class=HTMLResponse)
 def review_center(
     request: Request,
-    engine: str = Query("ALL"),
+    combo: str = Query("ALL"),
     outcome: str = Query("ALL"),
     rating: str = Query("ALL"),
+    diagnosis: str = Query("ALL"),
     sort: str = Query("DATE_DESC"),
     db=Depends(db_session),
 ):
     data = review_index_data(
         db,
-        engine=engine,
+        combo=combo,
         outcome=outcome,
         rating=rating,
+        diagnosis=diagnosis,
         sort=sort,
     )
     return templates.TemplateResponse("review.html", {

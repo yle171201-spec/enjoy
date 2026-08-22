@@ -23,6 +23,30 @@ TAG_OPTIONS = (
     "走势符合预期",
 )
 
+COMBOS = (
+    ("A", "A", ("A",)),
+    ("B", "B", ("B",)),
+    ("C", "C", ("C",)),
+    ("AB", "A+B", ("A", "B")),
+    ("AC", "A+C", ("A", "C")),
+    ("BC", "B+C", ("B", "C")),
+    ("ALL", "A+B+C", ("A", "B", "C")),
+)
+
+DIAGNOSES = (
+    ("DIRECT_FAIL", "买后直接失败", "MFE≤3% 且最终亏损"),
+    ("GIVEBACK", "赚过但没守住", "MFE≥12%，最终兑现不足35%"),
+    ("SOLD_RALLY", "卖后继续大涨", "退出后20日再涨≥12%"),
+    ("EXCELLENT", "优秀趋势单", "最终≥8%、MFE≥12%、MAE>-8%"),
+    ("HIGH_VOL", "高波动幸存", "MAE≤-12% 但最终盈利"),
+)
+
+
+def _combo_engines(combo: str):
+    combo = (combo or "ALL").upper()
+    mapping = {key: engines for key, _, engines in COMBOS}
+    return mapping.get(combo, mapping["ALL"])
+
 
 def _review_key(signal: Signal):
     return (
@@ -36,9 +60,9 @@ def _review_key(signal: Signal):
 def _signal_metrics(signal: Signal, bars: list[DailyBar]) -> dict:
     """Post-signal path metrics anchored to the historical V18 signal close.
 
-    MFE/MAE begin on the NEXT trading day because the signal price is the
-    signal-day close. This avoids using signal-day intraday extremes that
-    occurred before the close-entry signal existed.
+    The V18 historical signal price is the signal-day close. MFE/MAE therefore
+    begin on the next trading day, so signal-day intraday extremes that happened
+    before the close-entry signal existed are not counted.
     """
     out = {
         "next_open": None,
@@ -55,6 +79,11 @@ def _signal_metrics(signal: Signal, bars: list[DailyBar]) -> dict:
         "mfe_day": None,
         "mae_day": None,
         "hold_bars": None,
+        "giveback": None,
+        "capture": None,
+        "post_exit_r10": None,
+        "post_exit_r20": None,
+        "spark_points": "",
     }
     if not bars:
         return out
@@ -65,6 +94,7 @@ def _signal_metrics(signal: Signal, bars: list[DailyBar]) -> dict:
         return out
 
     entry = float(signal.signal_close)
+    exit_ret = getattr(signal, "exit_ret", None)
 
     if i + 1 < len(bars):
         out["next_open"] = float(bars[i + 1].open)
@@ -75,8 +105,10 @@ def _signal_metrics(signal: Signal, bars: list[DailyBar]) -> dict:
         if j < len(bars):
             out[key] = float(bars[j].close) / entry - 1
 
+    exit_i = None
     if signal.exit_date is not None and signal.exit_date in idx_by_date:
-        end_i = idx_by_date[signal.exit_date]
+        exit_i = idx_by_date[signal.exit_date]
+        end_i = exit_i
         out["hold_bars"] = max(0, end_i - i)
     else:
         end_i = min(len(bars) - 1, i + 20)
@@ -100,7 +132,66 @@ def _signal_metrics(signal: Signal, bars: list[DailyBar]) -> dict:
                 "mae_day": min_i - i,
             })
 
+    if exit_ret is not None and out["mfe"] is not None:
+        out["giveback"] = out["mfe"] - float(exit_ret)
+        if out["mfe"] > 0 and float(exit_ret) > 0:
+            out["capture"] = float(exit_ret) / out["mfe"]
+
+    if exit_i is not None and exit_ret is not None:
+        exit_price = entry * (1 + float(exit_ret))
+        for n, key in ((10, "post_exit_r10"), (20, "post_exit_r20")):
+            j = exit_i + n
+            if j < len(bars) and exit_price > 0:
+                out[key] = float(bars[j].close) / exit_price - 1
+
+    # Tiny post-signal path for the list card. It is deliberately lightweight
+    # SVG data rather than 62 ECharts instances.
+    closes = [entry]
+    for j in range(i + 1, min(len(bars), i + 21)):
+        closes.append(float(bars[j].close))
+    if len(closes) >= 2:
+        vals = [v / entry - 1 for v in closes]
+        lo, hi = min(vals), max(vals)
+        span = max(hi - lo, 0.01)
+        pts = []
+        denom = max(1, len(vals) - 1)
+        for k, v in enumerate(vals):
+            x = 100 * k / denom
+            y = 24 - 20 * (v - lo) / span
+            pts.append(f"{x:.1f},{y:.1f}")
+        out["spark_points"] = " ".join(pts)
+
     return out
+
+
+def _diagnosis_flags(row: dict) -> list[str]:
+    ret = row.get("exit_ret")
+    m = row.get("metrics") or {}
+    mfe = m.get("mfe")
+    mae = m.get("mae")
+    post20 = m.get("post_exit_r20")
+    flags = []
+
+    if ret is not None and ret < 0 and mfe is not None and mfe <= 0.03:
+        flags.append("DIRECT_FAIL")
+    if ret is not None and mfe is not None and mfe >= 0.12 and ret < 0.35 * mfe:
+        flags.append("GIVEBACK")
+    if post20 is not None and post20 >= 0.12:
+        flags.append("SOLD_RALLY")
+    if (
+        ret is not None and ret >= 0.08
+        and mfe is not None and mfe >= 0.12
+        and (mae is None or mae > -0.08)
+    ):
+        flags.append("EXCELLENT")
+    if ret is not None and ret > 0 and mae is not None and mae <= -0.12:
+        flags.append("HIGH_VOL")
+    return flags
+
+
+def _diagnosis_labels(flags: list[str]) -> list[str]:
+    names = {key: label for key, label, _ in DIAGNOSES}
+    return [names[x] for x in flags if x in names]
 
 
 def _load_review_universe(db):
@@ -148,7 +239,7 @@ def _row_from_signal(signal, stock_map, bar_map, review_map):
     except Exception:
         tags = []
 
-    return {
+    row = {
         "id": signal.id,
         "signal": signal,
         "code": code,
@@ -169,18 +260,96 @@ def _row_from_signal(signal, stock_map, bar_map, review_map):
         "reviewed": bool(review and review.rating),
         "review_updated_at": review.updated_at if review else None,
     }
+    row["diagnosis"] = _diagnosis_flags(row)
+    row["diagnosis_labels"] = _diagnosis_labels(row["diagnosis"])
+    row["visual"] = {
+        "mfe_bar": min(100.0, abs(float(row["metrics"].get("mfe") or 0.0)) * 300.0),
+        "mae_bar": min(100.0, abs(float(row["metrics"].get("mae") or 0.0)) * 300.0),
+        "exit_bar": min(100.0, abs(float(row["exit_ret"] or 0.0)) * 300.0),
+    }
+    return row
 
 
-def _filter_rows(rows, engine="ALL", outcome="ALL", rating="ALL"):
-    engine = (engine or "ALL").upper()
+def _summary(rows) -> dict:
+    closed = [r for r in rows if r["exit_ret"] is not None]
+    rets = [float(r["exit_ret"]) for r in closed]
+    wins = [r for r in closed if r["exit_ret"] > 0]
+    losses = [r for r in closed if r["exit_ret"] <= 0]
+    pos_sum = sum(float(r["exit_ret"]) for r in wins)
+    neg_sum = abs(sum(float(r["exit_ret"]) for r in losses))
+    avg_win = sum(float(r["exit_ret"]) for r in wins) / len(wins) if wins else None
+    avg_loss = sum(float(r["exit_ret"]) for r in losses) / len(losses) if losses else None
+
+    mfes = [r["metrics"].get("mfe") for r in rows if r["metrics"].get("mfe") is not None]
+    maes = [r["metrics"].get("mae") for r in rows if r["metrics"].get("mae") is not None]
+    r5s = [r["metrics"].get("r5") for r in rows if r["metrics"].get("r5") is not None]
+    r10s = [r["metrics"].get("r10") for r in rows if r["metrics"].get("r10") is not None]
+    r20s = [r["metrics"].get("r20") for r in rows if r["metrics"].get("r20") is not None]
+
+    mfe_pool = sum(max(0.0, float(x)) for x in mfes)
+    capture = pos_sum / mfe_pool if mfe_pool > 0 else None
+
+    sorted_rets = sorted(rets)
+    if not sorted_rets:
+        median = None
+    elif len(sorted_rets) % 2:
+        median = sorted_rets[len(sorted_rets)//2]
+    else:
+        k = len(sorted_rets)//2
+        median = (sorted_rets[k-1] + sorted_rets[k]) / 2
+
+    n = len(rows)
+    if n < 5:
+        sample_note = "样本极少"
+    elif n < 15:
+        sample_note = "样本偏少"
+    else:
+        sample_note = ""
+
+    reviewed = [r for r in rows if r["reviewed"]]
+    excellent_reviews = [r for r in reviewed if r["rating"] == "优秀"]
+
+    return {
+        "total": n,
+        "A": sum(1 for r in rows if r["engine"] == "A"),
+        "B": sum(1 for r in rows if r["engine"] == "B"),
+        "C": sum(1 for r in rows if r["engine"] == "C"),
+        "closed": len(closed),
+        "wins": len(wins),
+        "win_rate": len(wins) / len(closed) if closed else None,
+        "avg_ret": sum(rets) / len(rets) if rets else None,
+        "median_ret": median,
+        "profit_factor": pos_sum / neg_sum if neg_sum > 0 else None,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff": (avg_win / abs(avg_loss)) if avg_win is not None and avg_loss not in (None, 0) else None,
+        "avg_mfe": sum(mfes) / len(mfes) if mfes else None,
+        "avg_mae": sum(maes) / len(maes) if maes else None,
+        "capture_rate": capture,
+        "avg_r5": sum(r5s) / len(r5s) if r5s else None,
+        "avg_r10": sum(r10s) / len(r10s) if r10s else None,
+        "avg_r20": sum(r20s) / len(r20s) if r20s else None,
+        "best": max(rets) if rets else None,
+        "worst": min(rets) if rets else None,
+        "net_signal_return": sum(rets) if rets else 0.0,
+        "gross_profit": pos_sum,
+        "gross_loss": neg_sum,
+        "reviewed": len(reviewed),
+        "excellent_review_rate": len(excellent_reviews) / len(reviewed) if reviewed else None,
+        "sample_note": sample_note,
+    }
+
+
+def _filter_rows(rows, outcome="ALL", rating="ALL", diagnosis="ALL", engine="ALL"):
     outcome = (outcome or "ALL").upper()
     rating = rating or "ALL"
+    diagnosis = (diagnosis or "ALL").upper()
+    engine = (engine or "ALL").upper()
 
     out = []
     for r in rows:
         if engine in {"A", "B", "C"} and r["engine"] != engine:
             continue
-
         ret = r["exit_ret"]
         if outcome == "WIN" and not (ret is not None and ret > 0):
             continue
@@ -192,6 +361,9 @@ def _filter_rows(rows, engine="ALL", outcome="ALL", rating="ALL"):
         if rating == "UNREVIEWED" and r["reviewed"]:
             continue
         if rating in RATINGS and r["rating"] != rating:
+            continue
+
+        if diagnosis != "ALL" and diagnosis not in r["diagnosis"]:
             continue
         out.append(r)
     return out
@@ -212,48 +384,90 @@ def _sort_rows(rows, sort="DATE_DESC"):
     return sorted(rows, key=lambda r: (r["signal_date"], r["code"], r["engine"]), reverse=True)
 
 
-def _summary(rows) -> dict:
-    closed = [r for r in rows if r["exit_ret"] is not None]
-    wins = [r for r in closed if r["exit_ret"] > 0]
-    losses = [r for r in closed if r["exit_ret"] <= 0]
-    pos_sum = sum(float(r["exit_ret"]) for r in wins)
-    neg_sum = abs(sum(float(r["exit_ret"]) for r in losses))
-    mfes = [r["metrics"].get("mfe") for r in rows if r["metrics"].get("mfe") is not None]
-    maes = [r["metrics"].get("mae") for r in rows if r["metrics"].get("mae") is not None]
-
-    return {
-        "total": len(rows),
-        "A": sum(1 for r in rows if r["engine"] == "A"),
-        "B": sum(1 for r in rows if r["engine"] == "B"),
-        "C": sum(1 for r in rows if r["engine"] == "C"),
-        "closed": len(closed),
-        "wins": len(wins),
-        "win_rate": len(wins) / len(closed) if closed else None,
-        "avg_ret": sum(float(r["exit_ret"]) for r in closed) / len(closed) if closed else None,
-        "profit_factor": pos_sum / neg_sum if neg_sum > 0 else None,
-        "avg_mfe": sum(mfes) / len(mfes) if mfes else None,
-        "avg_mae": sum(maes) / len(maes) if maes else None,
-        "reviewed": sum(1 for r in rows if r["reviewed"]),
-    }
+def _combo_matrix(all_rows):
+    matrix = []
+    for key, label, engines in COMBOS:
+        subset = [r for r in all_rows if r["engine"] in engines]
+        row = _summary(subset)
+        row.update({"key": key, "label": label, "engines": "".join(engines)})
+        matrix.append(row)
+    return matrix
 
 
-def review_index_data(db, engine="ALL", outcome="ALL", rating="ALL", sort="DATE_DESC"):
+def _engine_contribution(all_rows):
+    rows = []
+    for e in "ABC":
+        subset = [r for r in all_rows if r["engine"] == e]
+        s = _summary(subset)
+        rows.append({
+            "engine": e,
+            "total": s["total"],
+            "net": s["net_signal_return"],
+            "gross_profit": s["gross_profit"],
+            "gross_loss": s["gross_loss"],
+        })
+    scale = max([abs(r["net"]) for r in rows] + [0.01])
+    for r in rows:
+        r["bar_pct"] = min(100.0, abs(r["net"]) / scale * 100)
+    return rows
+
+
+def _diagnosis_summary(rows):
+    out = []
+    for key, label, desc in DIAGNOSES:
+        n = sum(1 for r in rows if key in r["diagnosis"])
+        out.append({
+            "key": key,
+            "label": label,
+            "desc": desc,
+            "count": n,
+            "rate": n / len(rows) if rows else 0.0,
+        })
+    return out
+
+
+def review_index_data(
+    db,
+    combo="ALL",
+    outcome="ALL",
+    rating="ALL",
+    diagnosis="ALL",
+    sort="DATE_DESC",
+):
     signals, stock_map, bar_map, review_map = _load_review_universe(db)
     all_rows = [_row_from_signal(s, stock_map, bar_map, review_map) for s in signals]
+
+    matrix = _combo_matrix(all_rows)
+    combo = (combo or "ALL").upper()
+    valid_combo = {x[0] for x in COMBOS}
+    if combo not in valid_combo:
+        combo = "ALL"
+    engines = set(_combo_engines(combo))
+    combo_rows = [r for r in all_rows if r["engine"] in engines]
+
     filtered = _sort_rows(
-        _filter_rows(all_rows, engine=engine, outcome=outcome, rating=rating),
+        _filter_rows(combo_rows, outcome=outcome, rating=rating, diagnosis=diagnosis),
         sort=sort,
     )
+    selected = next((x for x in matrix if x["key"] == combo), _summary(combo_rows))
+
     return {
         "rows": filtered,
-        "summary": _summary(all_rows),
+        "all_summary": _summary(all_rows),
+        "summary": selected,
+        "matrix": matrix,
+        "contribution": _engine_contribution(all_rows),
+        "diagnosis_summary": _diagnosis_summary(combo_rows),
         "filtered_count": len(filtered),
         "ratings": RATINGS,
+        "diagnoses": DIAGNOSES,
+        "combos": COMBOS,
         "tag_options": TAG_OPTIONS,
         "filters": {
-            "engine": engine,
+            "combo": combo,
             "outcome": outcome,
             "rating": rating,
+            "diagnosis": diagnosis,
             "sort": sort,
         },
     }
@@ -372,6 +586,28 @@ def build_review_chart(db, signal_id: int, pre: int = 60, post: int = 40) -> dic
             "engine": signal.engine,
             "kind": "mae",
         })
+
+    chart["verticals"] = [{
+        "date": signal.signal_date.isoformat(),
+        "label": f"{signal.engine}信号",
+        "engine": signal.engine,
+        "kind": "buy",
+    }]
+    if signal.exit_date is not None:
+        chart["verticals"].append({
+            "date": signal.exit_date.isoformat(),
+            "label": "退出",
+            "engine": signal.engine,
+            "kind": "sell",
+        })
+        chart["periods"] = [{
+            "start": signal.signal_date.isoformat(),
+            "end": signal.exit_date.isoformat(),
+            "name": "策略持有期",
+            "kind": "holding",
+        }]
+    else:
+        chart["periods"] = []
 
     chart["focus"] = {
         "signal_id": signal.id,
