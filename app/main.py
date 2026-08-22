@@ -53,6 +53,48 @@ def _bg_latest_audit(limit: int, retry_errors: bool = False):
         db.close()
 
 
+def _bg_smart_update():
+    db = SessionLocal()
+    try:
+        stats = data_stats(db)
+
+        if float(stats.get("bootstrap_coverage") or 0.0) < 0.9999:
+            retry_errors = bool(
+                int(stats.get("bootstrap_errors") or 0) > 0
+                and int(stats.get("bootstrap_done") or 0)
+                + int(stats.get("bootstrap_errors") or 0)
+                >= int(stats.get("strategy_pool") or 0)
+            )
+            bootstrap_batch(
+                db,
+                limit=max(100, int(settings.bootstrap_batch_size)),
+                retry_errors=retry_errors,
+            )
+            return
+
+        update = sync_daily_public(db)
+        if update.get("status") == "ok":
+            run_full_scan(db)
+            return
+
+        stats = data_stats(db)
+        if stats.get("scan_ready"):
+            return
+
+        unresolved = int(stats.get("latest_unresolved") or 0)
+        problems = int(stats.get("latest_audit_problem") or 0)
+        unattempted = max(0, unresolved - problems)
+
+        if unattempted > 0:
+            audit_latest_day(db, limit=min(500, max(200, unattempted)), retry_errors=False)
+            return
+
+        if problems > 0:
+            audit_latest_day(db, limit=min(200, max(50, problems)), retry_errors=True)
+    finally:
+        db.close()
+
+
 def _data_job_busy(db) -> bool:
     return bool(db.execute(
         select(func.count(DataUpdateRun.id)).where(DataUpdateRun.status == "running")
@@ -501,6 +543,16 @@ def data_page(request: Request, db=Depends(db_session)):
         "gap_batch_size": settings.gap_repair_batch_size,
         "audit_batch_size": settings.latest_audit_batch_size,
     })
+
+
+@app.post("/admin/smart-update")
+def admin_smart_update(
+    background_tasks: BackgroundTasks,
+    db=Depends(db_session),
+):
+    if not _data_job_busy(db):
+        background_tasks.add_task(_bg_smart_update)
+    return RedirectResponse("/data", 303)
 
 
 @app.post("/admin/bootstrap")

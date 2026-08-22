@@ -4,239 +4,181 @@
 
 <section class="hero">
   <div>
-    <span class="eyebrow">PUBLIC DATA PIPELINE</span>
+    <span class="eyebrow">DATA STATUS</span>
     <h1>数据管理</h1>
-    <p>V2.1.8 将“最新交易日有K线”和“已确认停牌”分开核验。空响应不再直接等同于停牌；缺失股票会逐只审计，能补回的补回，只有 BaoStock 明确 tradestatus=0 才计为确认停牌。</p>
+    <p>V2.1.9 将日常操作收敛为一个入口。初始化、盘后安全更新、缺口审计和异常重试仍保留在后台，由系统自动判断下一步。</p>
   </div>
   <div class="status">
     <div>数据源 <b>{{ provider }}</b></div>
-    <div>初始化起点 <b>{{ bootstrap_start }}</b></div>
-    <div>应完成交易日 <b>{{ stats.expected_latest or stats.latest or '暂无' }}</b></div>
-    <div>历史最早 <b>{{ stats.earliest or '暂无' }}</b></div>
+    <div>当前数据日 <b>{{ stats.expected_latest or stats.latest or '暂无' }}</b></div>
+    <div>数据库 <b>{% if storage.available %}{{ '{:.0f}'.format(storage.used_mb) }} / {{ storage.capacity_mb }} MB{% else %}未知{% endif %}</b></div>
+    <div>容量 <b class="{{ 'ok' if storage.level == 'SAFE' else 'warn-text' }}">{{ storage.level_cn if storage.available else '-' }}</b></div>
   </div>
 </section>
 
-<div class="metrics">
-  <div><span>股票元数据</span><b>{{ '{:,}'.format(stats.stocks) }}</b></div>
-  <div><span>策略股票池</span><b id="metric-strategy-pool">{{ '{:,}'.format(stats.strategy_pool) }}</b></div>
-  <div><span>历史初始化</span><b id="metric-bootstrap-done">{{ '{:,}'.format(stats.bootstrap_done) }}/{{ '{:,}'.format(stats.strategy_pool) }}</b></div>
-  <div><span>历史池覆盖率</span><b id="metric-history-pct">{{ '{:.1%}'.format(stats.bootstrap_coverage) }}</b></div>
-  <div><span>当日实际K线</span><b id="metric-latest-rows">{{ '{:,}'.format(stats.latest_strategy_rows) }}</b></div>
-  <div><span>已核验覆盖</span><b id="metric-verified-pct" class="{{ 'ok' if stats.latest_verified_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_verified_coverage) }}</b></div>
-  <div><span>仍未核清</span><b id="metric-unresolved" class="{{ 'warn-text' if stats.latest_unresolved else 'ok' }}">{{ stats.latest_unresolved }}</b></div>
-  <div><span>正式ABC扫描</span><b id="metric-scan" class="{{ 'ok' if stats.scan_ready else 'warn-text' }}">{{ 'READY' if stats.scan_ready else 'BLOCKED' }}</b></div>
-</div>
+<section class="panel">
+  <div class="section-head">
+    <div><span class="eyebrow">SYSTEM HEALTH</span><h2>当前数据状态</h2></div>
+    <div><b id="metric-scan" style="font-size:28px" class="{{ 'ok' if stats.scan_ready else 'warn-text' }}">{{ 'READY' if stats.scan_ready else 'BLOCKED' }}</b></div>
+  </div>
 
-<section class="note">
-  <b>为什么“没有待初始化股票”但最新日线仍可能不满：</b>
-  历史初始化只表示策略股票池已经建立过历史序列；它和“目标交易日是否有K线”是两件事。
-  V2.1.8 以后，正式扫描看的是最新交易日审计结果，而不是历史初始化按钮。
-</section>
+  <div class="metrics">
+    <div><span>策略股票池</span><b id="metric-strategy-pool">{{ '{:,}'.format(stats.strategy_pool) }}</b></div>
+    <div><span>实际K线</span><b id="metric-latest-rows">{{ '{:,}'.format(stats.latest_strategy_rows) }}</b></div>
+    <div><span>确认停牌</span><b id="metric-suspended">{{ '{:,}'.format(stats.latest_suspended) }}</b></div>
+    <div><span>仍未核清</span><b id="metric-unresolved" class="{{ 'warn-text' if stats.latest_unresolved else 'ok' }}">{{ '{:,}'.format(stats.latest_unresolved) }}</b></div>
+    <div><span>已核验覆盖</span><b id="metric-verified" class="{{ 'ok' if stats.latest_verified_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_verified_coverage) }}</b></div>
+    <div><span>历史池</span><b id="metric-history">{{ '{:.1%}'.format(stats.bootstrap_coverage) }}</b></div>
+  </div>
 
-<section class="note">
-  <b>完整性状态：</b>
   {% if stats.scan_ready %}
-    <span id="integrity-status" class="ok">READY。历史池、最新交易日可交易覆盖、最新交易日核验覆盖和交易日历均通过，可以运行正式 A/B/C 扫描。</span>
+  <section class="note" style="margin-top:16px">
+    <b class="ok">数据已通过完整性门。</b>
+    {{ stats.latest_strategy_rows }} 只实际K线 + {{ stats.latest_suspended }} 只确认停牌 = {{ stats.strategy_pool }} 只策略股票全部核验，可以正式运行 ABC 扫描。
+  </section>
   {% else %}
-    <span id="integrity-status" class="warn-text">BLOCKED：{{ stats.scan_block_reason }}</span>
+  <section class="note" style="margin-top:16px">
+    <b class="warn-text">当前暂不允许正式扫描：</b>{{ stats.scan_block_reason }}
+  </section>
   {% endif %}
-</section>
 
-<section class="panel">
-  <span class="eyebrow">LATEST-DAY AUDIT</span>
-  <h2>最新交易日审计与精准补漏</h2>
-  <div class="metrics">
-    <div><span>目标交易日</span><b>{{ stats.expected_latest or stats.latest or '-' }}</b></div>
-    <div><span>策略股票池</span><b id="latest-pool">{{ '{:,}'.format(stats.strategy_pool) }}</b></div>
-    <div><span>实际有K线</span><b id="latest-rows">{{ '{:,}'.format(stats.latest_strategy_rows) }}</b></div>
-    <div><span>确认停牌</span><b id="latest-suspended">{{ '{:,}'.format(stats.latest_suspended) }}</b></div>
-    <div><span>仍未核清</span><b id="latest-unresolved" class="{{ 'warn-text' if stats.latest_unresolved else 'ok' }}">{{ '{:,}'.format(stats.latest_unresolved) }}</b></div>
-    <div><span>可交易覆盖率</span><b id="latest-tradable-pct" class="{{ 'ok' if stats.latest_coverage_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_tradable_coverage) }}</b></div>
-    <div><span>已核验覆盖率</span><b id="latest-verified-pct" class="{{ 'ok' if stats.latest_verified_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_verified_coverage) }}</b></div>
-    <div><span>未知/无效/错误</span><b id="latest-problems" class="{{ 'warn-text' if stats.latest_audit_problem else 'ok' }}">{{ stats.latest_audit_problem }}</b></div>
-  </div>
-
-  <p class="muted">
-    正式扫描要求：可交易股票日线覆盖 ≥ {{ '{:.0%}'.format(stats.latest_coverage_threshold) }}，
-    且“实际K线 + 明确确认停牌”的核验覆盖 ≥ {{ '{:.1%}'.format(stats.latest_verified_threshold) }}。
-    这样既不会要求停牌股凭空产生K线，也不会把数据源空响应误当成停牌。
+  <form method="post" action="/admin/smart-update" style="margin-top:18px">
+    <button id="smart-update-button" class="primary" type="submit" {% if bootstrap_busy %}disabled{% endif %} style="font-size:16px;padding:12px 26px">
+      {{ '数据任务运行中' if bootstrap_busy else ('检查是否有新数据' if stats.scan_ready else '智能修复并更新数据') }}
+    </button>
+  </form>
+  <p class="muted" style="margin-top:10px">
+    {% if stats.scan_ready %}
+      当前已经完整。点击后会自动检查新的已收盘交易日；周末、节假日或未到安全收盘时间会自动跳过。
+    {% else %}
+      系统会自动选择：历史初始化 → 安全盘后更新 → 缺失审计 → 异常重试。日常无需判断该点哪个按钮。
+    {% endif %}
   </p>
-
-  <form method="post" action="/admin/audit-latest" class="toolbar compact-toolbar">
-    <label>本批审计股票数<input id="audit-limit" name="limit" type="number" value="{{ audit_batch_size }}" min="1" max="500" {% if bootstrap_busy %}disabled{% endif %}></label>
-    <button id="audit-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else '审计并补齐缺失股票' }}</button>
-  </form>
-
-  <form method="post" action="/admin/audit-latest-errors" class="toolbar compact-toolbar" style="margin-top:12px">
-    <label>未知/错误重试数<input id="audit-retry-limit" name="limit" type="number" value="100" min="1" max="200" {% if bootstrap_busy %}disabled{% endif %}></label>
-    <button id="audit-retry-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试未知/错误</button>
-  </form>
-
-  <p class="muted">建议先反复执行“审计并补齐缺失股票”，直到显示没有新的待审计股票；若仍有未核清，再执行“重试未知/错误”。达到门槛后刷新页面做交易日历最终核验。</p>
 </section>
-
-<section class="panel">
-  <span class="eyebrow">DATABASE CAPACITY</span>
-  <h2>数据库容量监控</h2>
-  {% if storage.available %}
-  <div class="metrics">
-    <div><span>数据库已用</span><b>{{ '{:.1f}'.format(storage.used_mb) }} MB{% if storage.capacity_mb %} / {{ storage.capacity_mb }} MB{% endif %}</b></div>
-    <div><span>当前使用率</span><b>{{ '{:.1%}'.format(storage.used_pct) if storage.used_pct is not none else '未配置上限' }}</b></div>
-    <div><span>全市场预计</span><b>{{ ('{:.0f}'.format(storage.projected_mb) ~ ' MB') if storage.projected_mb is not none else '等待更多样本' }}</b></div>
-    <div><span>预计占用率</span><b>{{ '{:.1%}'.format(storage.projected_pct) if storage.projected_pct is not none else '-' }}</b></div>
-    <div><span>容量判断</span><b class="{{ 'ok' if storage.level == 'SAFE' else 'warn-text' }}">{{ storage.level_cn }}</b></div>
-  </div>
-  {% else %}
-  <p class="muted">暂时无法读取数据库容量{% if storage.error %}：{{ storage.error }}{% endif %}</p>
-  {% endif %}
-</section>
-
-<div class="compare-grid">
-  <section class="panel">
-    <span class="eyebrow">FIRST BOOTSTRAP</span>
-    <h2>历史初始化（策略股票池）</h2>
-    <p class="muted">这一块只负责历史序列。历史池已经 100% 时，不需要因为最新交易日缺K线而重新初始化。</p>
-    <form method="post" action="/admin/bootstrap" class="toolbar compact-toolbar">
-      <label>本批股票数<input id="bootstrap-limit" name="limit" type="number" value="{{ batch_size }}" min="1" max="500" {% if bootstrap_busy or stats.bootstrap_coverage >= 0.9999 %}disabled{% endif %}></label>
-      <button id="bootstrap-button" type="submit" {% if bootstrap_busy or stats.bootstrap_coverage >= 0.9999 %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else ('历史初始化已完成' if stats.bootstrap_coverage >= 0.9999 else '后台初始化下一批') }}</button>
-    </form>
-    <form id="retry-form" method="post" action="/admin/bootstrap-errors" class="toolbar compact-toolbar" style="margin-top:12px;{% if not stats.bootstrap_errors %}display:none{% endif %}">
-      <label>历史错误重试数<input id="retry-limit" name="limit" type="number" value="20" min="1" max="100" {% if bootstrap_busy %}disabled{% endif %}></label>
-      <button id="retry-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试历史错误</button>
-    </form>
-  </section>
-
-  <section class="panel">
-    <span class="eyebrow">POST-CLOSE DAILY</span>
-    <h2>收盘后更新 + ABC扫描</h2>
-    <p class="muted">日常交易日收盘后仍走全市场快照；正式扫描内部会再次调用完整性门，任何一项未通过都不会生成正式选股。</p>
-    <form method="post" action="/admin/daily-update">
-      <button type="submit" class="primary">立即执行一次安全盘后更新</button>
-    </form>
-  </section>
-</div>
 
 <section class="note">
-  <b>最近数据任务：</b><span id="live-task-summary">{% if update %}{{ update.status }} ｜ {{ update.provider }} ｜ {{ update.start_date or '-' }} → {{ update.end_date or '-' }} ｜ 成功 {{ update.success_count }}/{{ update.stock_count }} ｜ 失败 {{ update.failed_count }}{% else %}暂无{% endif %}</span>
-  <span id="live-running-hint" class="ok">{% if update and update.status == 'running' %} ｜ 正在执行，页面每 3 秒自动更新{% endif %}</span>
+  <b>最近数据任务：</b>
+  <span id="live-task-summary">{% if update %}{{ update.status }} ｜ {{ update.provider }} ｜ {{ update.start_date or '-' }} → {{ update.end_date or '-' }} ｜ 成功 {{ update.success_count }}/{{ update.stock_count }} ｜ 失败 {{ update.failed_count }}{% else %}暂无{% endif %}</span>
+  <span id="live-running-hint" class="ok">{% if update and update.status == 'running' %} ｜ 正在执行，页面自动更新{% endif %}</span>
   <span id="live-poll-status" class="muted" style="float:right">自动刷新：准备中</span>
   <pre id="live-task-message">{% if update and update.message %}{{ update.message }}{% endif %}</pre>
 </section>
 
-{% if errors %}
-<section>
-  <div class="section-head"><div><span class="eyebrow">HISTORY RETRY QUEUE</span><h2>最近历史初始化错误</h2></div></div>
-  <div class="table-wrap"><table><thead><tr><th>代码</th><th>状态</th><th>行数</th><th>更新时间</th><th>信息</th></tr></thead><tbody>
-  {% for e in errors %}<tr><td>{{e.code}}</td><td>{{e.status}}</td><td>{{e.row_count}}</td><td>{{e.updated_at}}</td><td>{{e.message}}</td></tr>{% endfor %}
-  </tbody></table></div>
-</section>
-{% endif %}
+<details class="panel" style="margin-top:18px">
+  <summary style="cursor:pointer;font-weight:700;font-size:17px">高级维护（一般不需要打开）</summary>
+  <div class="metrics" style="margin-top:18px">
+    <div><span>股票元数据</span><b>{{ '{:,}'.format(stats.stocks) }}</b></div>
+    <div><span>历史初始化</span><b>{{ '{:,}'.format(stats.bootstrap_done) }}/{{ '{:,}'.format(stats.strategy_pool) }}</b></div>
+    <div><span>可交易覆盖</span><b>{{ '{:.1%}'.format(stats.latest_tradable_coverage) }}</b></div>
+    <div><span>未知/无效/错误</span><b class="{{ 'warn-text' if stats.latest_audit_problem else 'ok' }}">{{ stats.latest_audit_problem }}</b></div>
+    <div><span>历史最早</span><b>{{ stats.earliest or '-' }}</b></div>
+    <div><span>目标交易日</span><b>{{ stats.expected_latest or stats.latest or '-' }}</b></div>
+  </div>
 
-<section class="note">
-  <b>当前测试环境提示：</b>Render Free Postgres 只有 1 GB 且 30 天到期。测试库可验证完整链路，长期正式运行仍建议迁移到持久化数据库。
-</section>
+  <div class="compare-grid" style="margin-top:18px">
+    <section class="note">
+      <b>最新交易日审计</b>
+      <p class="muted">主按钮无法自动解决时再用。</p>
+      <form method="post" action="/admin/audit-latest" class="toolbar compact-toolbar">
+        <label>审计数<input name="limit" type="number" value="{{ audit_batch_size }}" min="1" max="500" {% if bootstrap_busy %}disabled{% endif %}></label>
+        <button type="submit" {% if bootstrap_busy %}disabled{% endif %}>手动审计缺失股票</button>
+      </form>
+      <form method="post" action="/admin/audit-latest-errors" class="toolbar compact-toolbar" style="margin-top:10px">
+        <label>重试数<input name="limit" type="number" value="100" min="1" max="200" {% if bootstrap_busy %}disabled{% endif %}></label>
+        <button type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试未知/错误</button>
+      </form>
+    </section>
+
+    <section class="note">
+      <b>历史初始化</b>
+      <p class="muted">仅首次建库或历史池确实不完整时使用。</p>
+      <form method="post" action="/admin/bootstrap" class="toolbar compact-toolbar">
+        <label>批次<input name="limit" type="number" value="{{ batch_size }}" min="1" max="500" {% if bootstrap_busy or stats.bootstrap_coverage >= 0.9999 %}disabled{% endif %}></label>
+        <button type="submit" {% if bootstrap_busy or stats.bootstrap_coverage >= 0.9999 %}disabled{% endif %}>{{ '历史初始化已完成' if stats.bootstrap_coverage >= 0.9999 else '继续历史初始化' }}</button>
+      </form>
+      {% if stats.bootstrap_errors %}
+      <form method="post" action="/admin/bootstrap-errors" class="toolbar compact-toolbar" style="margin-top:10px">
+        <button type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试历史错误</button>
+      </form>
+      {% endif %}
+    </section>
+  </div>
+
+  <section class="note" style="margin-top:14px">
+    <b>手动盘后更新</b>
+    <p class="muted">交易日和北京时间16:10等安全规则仍由后台强制执行。</p>
+    <form method="post" action="/admin/daily-update"><button type="submit" {% if bootstrap_busy %}disabled{% endif %}>手动执行安全盘后更新 + ABC扫描</button></form>
+  </section>
+
+  <section class="note" style="margin-top:14px">
+    <b>数据库容量：</b>
+    {% if storage.available %}
+      {{ '{:.1f}'.format(storage.used_mb) }} MB / {{ storage.capacity_mb }} MB（{{ '{:.1%}'.format(storage.used_pct) if storage.used_pct is not none else '-' }}），
+      预计全市场 {{ '{:.0f}'.format(storage.projected_mb) if storage.projected_mb is not none else '-' }} MB，
+      <b class="{{ 'ok' if storage.level == 'SAFE' else 'warn-text' }}">{{ storage.level_cn }}</b>。
+    {% else %}暂时无法读取容量。{% endif %}
+  </section>
+</details>
+
+<section class="note"><b>使用原则：</b>日常只看顶部状态和主按钮。只有 BLOCKED 且智能更新反复无法解决时，再展开高级维护。</section>
 
 <script>
 (() => {
-  const ACTIVE_MS = 3000, IDLE_MS = 15000, HIDDEN_MS = 15000;
-  const TARGET_DATE = "{{ stats.expected_latest or stats.latest or '' }}";
-  const HISTORY_COMPLETE = {{ 'true' if stats.bootstrap_coverage >= 0.9999 else 'false' }};
-  let timer = null, polls = 0, lastBusy = {{ 'true' if bootstrap_busy else 'false' }};
-  const el = id => document.getElementById(id);
-  const fmtInt = v => Number(v || 0).toLocaleString('zh-CN');
-  const fmtPct = v => `${(Number(v || 0) * 100).toFixed(1)}%`;
+  const ACTIVE_MS=3000, IDLE_MS=15000, HIDDEN_MS=15000;
+  const TARGET_DATE="{{ stats.expected_latest or stats.latest or '' }}";
+  let timer=null, polls=0, lastBusy={{ 'true' if bootstrap_busy else 'false' }};
+  const el=id=>document.getElementById(id);
+  const fmtInt=v=>Number(v||0).toLocaleString('zh-CN');
+  const fmtPct=v=>`${(Number(v||0)*100).toFixed(1)}%`;
 
-  function setBusy(busy) {
-    ['audit-limit','audit-button','audit-retry-limit','audit-retry-button','bootstrap-limit','bootstrap-button','retry-limit','retry-button'].forEach(id => {
-      const n = el(id);
-      if (n) n.disabled = !!busy || (HISTORY_COMPLETE && id.startsWith('bootstrap'));
-    });
-    if (el('audit-button')) el('audit-button').textContent = busy ? '数据任务运行中' : '审计并补齐缺失股票';
-    if (el('bootstrap-button')) el('bootstrap-button').textContent = busy ? '数据任务运行中' : (HISTORY_COMPLETE ? '历史初始化已完成' : '后台初始化下一批');
+  function setBusy(busy){
+    const b=el('smart-update-button');
+    if(b){b.disabled=!!busy;if(busy)b.textContent='数据任务运行中';}
   }
 
-  function apply(data) {
-    const u = data.update;
-    if (u) {
-      if (el('live-task-summary')) el('live-task-summary').textContent = `${u.status} ｜ ${u.provider || '-'} ｜ ${u.start_date || '-'} → ${u.end_date || '-'} ｜ 成功 ${fmtInt(u.success_count)}/${fmtInt(u.stock_count)} ｜ 失败 ${fmtInt(u.failed_count)}`;
-      if (el('live-running-hint')) el('live-running-hint').textContent = u.status === 'running' ? ' ｜ 正在执行，页面每 3 秒自动更新' : '';
-      if (el('live-task-message')) el('live-task-message').textContent = u.message || '';
+  function apply(data){
+    const u=data.update;
+    if(u){
+      if(el('live-task-summary'))el('live-task-summary').textContent=`${u.status} ｜ ${u.provider||'-'} ｜ ${u.start_date||'-'} → ${u.end_date||'-'} ｜ 成功 ${fmtInt(u.success_count)}/${fmtInt(u.stock_count)} ｜ 失败 ${fmtInt(u.failed_count)}`;
+      if(el('live-running-hint'))el('live-running-hint').textContent=u.status==='running'?' ｜ 正在执行，页面自动更新':'';
+      if(el('live-task-message'))el('live-task-message').textContent=u.message||'';
     }
-
-    if (data.stats) {
-      const s = data.stats, pool = Number(s.strategy_pool || 0), rows = Number(s.latest_strategy_rows || 0);
-      const suspended = Number(s.latest_suspended || 0), unresolved = Number(s.latest_unresolved || 0);
-      const problems = Number(s.latest_audit_problem || 0), tradablePct = Number(s.latest_tradable_coverage || 0);
-      const verifiedPct = Number(s.latest_verified_coverage || 0);
-
-      if (el('metric-bootstrap-done')) el('metric-bootstrap-done').textContent = `${fmtInt(s.bootstrap_done)}/${fmtInt(pool)}`;
-      if (el('metric-history-pct')) el('metric-history-pct').textContent = fmtPct(s.bootstrap_coverage);
-      if (el('metric-latest-rows')) el('metric-latest-rows').textContent = fmtInt(rows);
-      if (el('metric-verified-pct')) el('metric-verified-pct').textContent = fmtPct(verifiedPct);
-      if (el('metric-unresolved')) el('metric-unresolved').textContent = fmtInt(unresolved);
-      if (el('latest-pool')) el('latest-pool').textContent = fmtInt(pool);
-      if (el('latest-rows')) el('latest-rows').textContent = fmtInt(rows);
-      if (el('latest-suspended')) el('latest-suspended').textContent = fmtInt(suspended);
-      if (el('latest-unresolved')) el('latest-unresolved').textContent = fmtInt(unresolved);
-      if (el('latest-problems')) el('latest-problems').textContent = fmtInt(problems);
-      if (el('latest-tradable-pct')) el('latest-tradable-pct').textContent = fmtPct(tradablePct);
-      if (el('latest-verified-pct')) el('latest-verified-pct').textContent = fmtPct(verifiedPct);
-
-      if (el('metric-scan') && el('metric-scan').textContent !== 'READY') {
-        const historyOk = Number(s.bootstrap_coverage || 0) >= Number(s.history_threshold || 0.95);
-        const tradableOk = tradablePct >= Number(s.latest_threshold || 0.95);
-        const verifiedOk = verifiedPct >= Number(s.verified_threshold || 0.995);
-        el('metric-scan').textContent = historyOk && tradableOk && verifiedOk ? '待最终核验' : 'BLOCKED';
-        el('metric-scan').className = 'warn-text';
-      }
+    if(data.stats){
+      const s=data.stats;
+      if(el('metric-strategy-pool'))el('metric-strategy-pool').textContent=fmtInt(s.strategy_pool);
+      if(el('metric-latest-rows'))el('metric-latest-rows').textContent=fmtInt(s.latest_strategy_rows);
+      if(el('metric-suspended'))el('metric-suspended').textContent=fmtInt(s.latest_suspended);
+      if(el('metric-unresolved'))el('metric-unresolved').textContent=fmtInt(s.latest_unresolved);
+      if(el('metric-verified'))el('metric-verified').textContent=fmtPct(s.latest_verified_coverage);
+      if(el('metric-history'))el('metric-history').textContent=fmtPct(s.bootstrap_coverage);
     }
     setBusy(!!data.data_busy);
   }
 
-  function schedule(ms) {
-    clearTimeout(timer);
-    timer = setTimeout(poll, document.hidden ? Math.max(ms, HIDDEN_MS) : ms);
-  }
+  function schedule(ms){clearTimeout(timer);timer=setTimeout(poll,document.hidden?Math.max(ms,HIDDEN_MS):ms);}
 
-  async function poll() {
+  async function poll(){
     polls++;
-    const full = polls === 1 || (lastBusy && polls % 10 === 0) || (!lastBusy && polls % 4 === 0);
-    const parts = [];
-    if (TARGET_DATE) parts.push(`target=${encodeURIComponent(TARGET_DATE)}`);
-    if (full) parts.push('full=1');
-    const qs = parts.length ? `?${parts.join('&')}` : '';
-    const status = el('live-poll-status');
-
-    try {
-      const res = await fetch(`/api/data/progress${qs}`, {cache:'no-store', headers:{Accept:'application/json'}});
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+    const full=polls===1||(lastBusy&&polls%10===0)||(!lastBusy&&polls%4===0);
+    const parts=[]; if(TARGET_DATE)parts.push(`target=${encodeURIComponent(TARGET_DATE)}`); if(full)parts.push('full=1');
+    const qs=parts.length?'?'+parts.join('&'):'';
+    const status=el('live-poll-status');
+    try{
+      const res=await fetch('/api/data/progress'+qs,{cache:'no-store',headers:{Accept:'application/json'}});
+      if(!res.ok)throw new Error();
+      const data=await res.json();
       apply(data);
-      if (lastBusy && !data.data_busy) polls = 0;
-      lastBusy = !!data.data_busy;
-      if (status) {
-        status.textContent = `自动刷新：已连接 · ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;
-        status.className = 'ok';
-      }
-      schedule(data.data_busy ? ACTIVE_MS : IDLE_MS);
-    } catch (e) {
-      if (status) {
-        status.textContent = '自动刷新：连接重试中';
-        status.className = 'warn-text';
-      }
-      schedule(document.hidden ? HIDDEN_MS : 5000);
+      if(lastBusy&&!data.data_busy){setTimeout(()=>window.location.reload(),700);return;}
+      lastBusy=!!data.data_busy;
+      if(status){status.textContent=`自动刷新：已连接 · ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;status.className='ok';}
+      schedule(data.data_busy?ACTIVE_MS:IDLE_MS);
+    }catch(e){
+      if(status){status.textContent='自动刷新：连接重试中';status.className='warn-text';}
+      schedule(document.hidden?HIDDEN_MS:5000);
     }
   }
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-      polls = 0;
-      clearTimeout(timer);
-      poll();
-    }
-  });
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){polls=0;clearTimeout(timer);poll();}});
   poll();
 })();
 </script>
-
-{% endblock %}
+{% endblock %}\n
