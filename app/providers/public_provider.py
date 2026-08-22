@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, time
 from zoneinfo import ZoneInfo
 import threading
+import time as _time
 import pandas as pd
 import numpy as np
 import akshare as ak
@@ -158,12 +159,29 @@ class PublicDataProvider(DataProvider):
         return x[cols].dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
 
     def repair_history(self, code: str, start: date, end: date) -> pd.DataFrame:
-        """Fast short-gap path: AKShare first; BaoStock only confirms empty intervals."""
+        # Stable short-gap path: retry AKShare, then always fall back to BaoStock.
         code = str(code).zfill(6)
-        x = self._history_akshare(code, start, end)
-        if x is not None and not x.empty:
-            return x
-        return self._history_baostock(code, start, end)
+        ak_errors = []
+
+        for attempt in range(1, 3):
+            try:
+                x = self._history_akshare(code, start, end)
+                if x is not None and not x.empty:
+                    return x
+                break
+            except Exception as e:
+                ak_errors.append(f"attempt{attempt}:{type(e).__name__}:{e}")
+                if attempt < 2:
+                    _time.sleep(1.0)
+
+        try:
+            return self._history_baostock(code, start, end)
+        except Exception as e:
+            ak_note = " | ".join(ak_errors) if ak_errors else "AKShare returned empty"
+            raise RuntimeError(
+                f"AKShare repair failed/empty [{ak_note}]; "
+                f"BaoStock fallback failed [{type(e).__name__}: {e}]"
+            ) from e
 
 
     def trade_dates(self, start: date, end: date) -> list[date]:

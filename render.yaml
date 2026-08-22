@@ -40,7 +40,7 @@ services:
       - key: GAP_REPAIR_BATCH_SIZE
         value: "500"
       - key: GAP_REPAIR_WORKERS
-        value: "6"
+        value: "2"
       - key: LIVE_SCAN_CALENDAR_DAYS
         value: "720"
       - key: MIN_SCAN_BOOTSTRAP_COVERAGE

@@ -5,7 +5,7 @@
   <div>
     <span class="eyebrow">PUBLIC DATA PIPELINE</span>
     <h1>数据管理</h1>
-    <p>无需 Tushare Token。V2.1.6 修复停牌/无交易股票反复进入缺口队列的问题，并启用短缺口并发抓取；3秒轮询只读任务状态，不再反复扫描百万行日线。</p>
+    <p>无需 Tushare Token。V2.1.7 将最新日线修复改为稳定优先：2路并发、AKShare自动重试，任何AK异常都会回退BaoStock；已完成数据不重复下载。</p>
   </div>
   <div class="status">
     <div>数据源 <b>{{ provider }}</b></div>
@@ -59,7 +59,7 @@
     <label>本批修复股票数<input id="repair-limit" name="limit" type="number" value="{{ gap_batch_size }}" min="1" max="500" {% if bootstrap_busy %}disabled{% endif %}></label>
     <button id="repair-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else '修复最新日线缺口' }}</button>
   </form>
-  <p class="muted">V2.1.6 使用 {{ settings_gap_workers|default(6) }} 路短缺口并发；已确认无交易/停牌的股票会按目标日记账，不会下一批再次占坑。修复错误可用下方按钮单独重试。</p>
+  <p class="muted">V2.1.7 使用 2 路稳定并发；AKShare 每只最多尝试2次，异常或空数据再由 BaoStock 兜底。已确认无交易/停牌的股票不会重复占坑；已有的8.21数据不会重新下载。</p>
   <form method="post" action="/admin/repair-latest-errors" class="toolbar compact-toolbar" style="margin-top:12px"><label>错误重试数<input name="limit" type="number" value="100" min="1" max="200" {% if bootstrap_busy %}disabled{% endif %}></label><button type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试修复错误</button></form>
 </section>
 
@@ -98,7 +98,7 @@
   <section class="panel">
     <span class="eyebrow">POST-CLOSE DAILY</span>
     <h2>收盘后更新 + ABC扫描</h2>
-    <p class="muted">V2.1.6 仍只在“当天为 A 股交易日 + 北京时间16:10以后”允许实时快照写入当日日线；并且快照覆盖率不足 {{ '{:.0%}'.format(stats.latest_coverage_threshold) }} 时不会触发正式扫描。</p>
+    <p class="muted">V2.1.7 仍只在“当天为 A 股交易日 + 北京时间16:10以后”允许实时快照写入当日日线；并且快照覆盖率不足 {{ '{:.0%}'.format(stats.latest_coverage_threshold) }} 时不会触发正式扫描。</p>
     <form method="post" action="/admin/daily-update">
       <button type="submit" class="primary">立即执行一次安全盘后更新</button>
     </form>
