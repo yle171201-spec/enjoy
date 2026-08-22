@@ -35,9 +35,13 @@ services:
         value: "200"
       - key: BOOTSTRAP_STOCK_TIMEOUT_SECONDS
         value: "60"
+      - key: GAP_REPAIR_BATCH_SIZE
+        value: "500"
       - key: LIVE_SCAN_CALENDAR_DAYS
         value: "720"
       - key: MIN_SCAN_BOOTSTRAP_COVERAGE
+        value: "0.95"
+      - key: MIN_LATEST_BAR_COVERAGE
         value: "0.95"
       - key: MIN_SCAN_HISTORY_BARS
         value: "250"
@@ -67,6 +71,8 @@ services:
       - key: LIVE_SCAN_CALENDAR_DAYS
         value: "720"
       - key: MIN_SCAN_BOOTSTRAP_COVERAGE
+        value: "0.95"
+      - key: MIN_LATEST_BAR_COVERAGE
         value: "0.95"
       - key: MIN_SCAN_HISTORY_BARS
         value: "250"

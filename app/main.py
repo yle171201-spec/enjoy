@@ -20,7 +20,7 @@ from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.chart_service import build_stock_chart
 from .services.data_update import (
     data_stats, bootstrap_batch, sync_daily_public, scan_readiness,
-    recover_interrupted_runs,
+    recover_interrupted_runs, repair_latest_gaps,
 )
 
 BASE = Path(__file__).resolve().parent
@@ -35,6 +35,20 @@ def _bg_bootstrap(limit: int, retry_errors: bool = False):
         bootstrap_batch(db, limit=limit, retry_errors=retry_errors)
     finally:
         db.close()
+
+
+def _bg_gap_repair(limit: int):
+    db = SessionLocal()
+    try:
+        repair_latest_gaps(db, limit=limit)
+    finally:
+        db.close()
+
+
+def _data_job_busy(db) -> bool:
+    return bool(db.execute(
+        select(func.count(DataUpdateRun.id)).where(DataUpdateRun.status == "running")
+    ).scalar_one() or 0)
 
 
 def _bg_daily_and_scan():
@@ -121,11 +135,11 @@ def _db_storage_stats(db, stats: dict) -> dict:
     }
 
 
-def _live_data_progress(db) -> dict:
+def _live_data_progress(db, target: date | None = None) -> dict:
     # Lightweight DB-only status for browser polling.
     stocks = int(db.execute(select(func.count(Stock.code))).scalar_one() or 0)
     bars = int(db.execute(select(func.count(DailyBar.id))).scalar_one() or 0)
-    active_nonst = int(db.execute(
+    strategy_pool = int(db.execute(
         select(func.count(Stock.code)).where(Stock.is_st.is_(False))
     ).scalar_one() or 0)
     bootstrap_done = int(db.execute(
@@ -134,25 +148,28 @@ def _live_data_progress(db) -> dict:
     bootstrap_errors = int(db.execute(
         select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "error")
     ).scalar_one() or 0)
-    coverage = (bootstrap_done / active_nonst) if active_nonst else 0.0
+    history_coverage = (
+        float(bootstrap_done) / float(strategy_pool) if strategy_pool else 0.0
+    )
 
     latest = db.execute(select(func.max(DailyBar.trade_date))).scalar_one_or_none()
-    latest_rows = 0
-    if latest is not None:
-        latest_rows = int(db.execute(
-            select(func.count(DailyBar.id)).where(DailyBar.trade_date == latest)
+    target_day = target or latest
+    latest_strategy_rows = 0
+    latest_coverage = 0.0
+    if target_day is not None and strategy_pool:
+        latest_strategy_rows = int(db.execute(
+            select(func.count(distinct(DailyBar.code)))
+            .join(Stock, Stock.code == DailyBar.code)
+            .where(
+                DailyBar.trade_date == target_day,
+                Stock.is_st.is_(False),
+            )
         ).scalar_one() or 0)
+        latest_coverage = float(latest_strategy_rows) / float(strategy_pool)
 
     update = db.execute(
         select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)
     ).scalar_one_or_none()
-
-    bootstrap_busy = bool(db.execute(
-        select(func.count(DataUpdateRun.id)).where(
-            DataUpdateRun.status == "running",
-            DataUpdateRun.provider.like("%-bootstrap%"),
-        )
-    ).scalar_one() or 0)
 
     update_payload = None
     if update is not None:
@@ -171,14 +188,20 @@ def _live_data_progress(db) -> dict:
         "stats": {
             "stocks": stocks,
             "bars": bars,
+            "strategy_pool": strategy_pool,
+            "excluded_metadata": max(0, stocks - strategy_pool),
             "bootstrap_done": bootstrap_done,
             "bootstrap_errors": bootstrap_errors,
-            "bootstrap_coverage": coverage,
+            "bootstrap_coverage": history_coverage,
             "latest": str(latest) if latest else None,
-            "latest_rows": latest_rows,
+            "latest_target": str(target_day) if target_day else None,
+            "latest_strategy_rows": latest_strategy_rows,
+            "latest_bar_coverage": latest_coverage,
+            "history_threshold": settings.min_scan_bootstrap_coverage,
+            "latest_threshold": settings.min_latest_bar_coverage,
         },
         "update": update_payload,
-        "bootstrap_busy": bootstrap_busy,
+        "data_busy": _data_job_busy(db),
     }
 
 
@@ -409,8 +432,11 @@ def portfolio_run(
 
 
 @app.get("/api/data/progress")
-def data_progress(db=Depends(db_session)):
-    return _live_data_progress(db)
+def data_progress(
+    target: date | None = Query(None),
+    db=Depends(db_session),
+):
+    return _live_data_progress(db, target=target)
 
 
 @app.get("/data", response_class=HTMLResponse)
@@ -421,18 +447,14 @@ def data_page(request: Request, db=Depends(db_session)):
     errors = db.execute(
         select(BootstrapStock).where(BootstrapStock.status == "error").order_by(BootstrapStock.updated_at.desc()).limit(20)
     ).scalars().all()
-    bootstrap_busy = bool(db.execute(
-        select(func.count(DataUpdateRun.id)).where(
-            DataUpdateRun.status == "running",
-            DataUpdateRun.provider.like("%-bootstrap%"),
-        )
-    ).scalar_one() or 0)
+    bootstrap_busy = _data_job_busy(db)
     return templates.TemplateResponse("data.html", {
         "request": request, "stats": stats, "update": update, "errors": errors,
         "provider": settings.data_provider, "bootstrap_start": settings.bootstrap_start_date,
         "batch_size": settings.bootstrap_batch_size, "storage": storage,
         "bootstrap_busy": bootstrap_busy,
         "stock_timeout": settings.bootstrap_stock_timeout_seconds,
+        "gap_batch_size": settings.gap_repair_batch_size,
     })
 
 
@@ -443,12 +465,7 @@ def admin_bootstrap(
     db=Depends(db_session),
 ):
     limit = max(1, min(int(limit), 500))
-    busy = bool(db.execute(
-        select(func.count(DataUpdateRun.id)).where(
-            DataUpdateRun.status == "running",
-            DataUpdateRun.provider.like("%-bootstrap%"),
-        )
-    ).scalar_one() or 0)
+    busy = _data_job_busy(db)
     if not busy:
         background_tasks.add_task(_bg_bootstrap, limit, False)
     return RedirectResponse("/data", 303)
@@ -461,14 +478,21 @@ def admin_bootstrap_errors(
     db=Depends(db_session),
 ):
     limit = max(1, min(int(limit), 100))
-    busy = bool(db.execute(
-        select(func.count(DataUpdateRun.id)).where(
-            DataUpdateRun.status == "running",
-            DataUpdateRun.provider.like("%-bootstrap%"),
-        )
-    ).scalar_one() or 0)
+    busy = _data_job_busy(db)
     if not busy:
         background_tasks.add_task(_bg_bootstrap, limit, True)
+    return RedirectResponse("/data", 303)
+
+
+@app.post("/admin/repair-latest")
+def admin_repair_latest(
+    background_tasks: BackgroundTasks,
+    limit: int = Form(500),
+    db=Depends(db_session),
+):
+    limit = max(1, min(int(limit), 500))
+    if not _data_job_busy(db):
+        background_tasks.add_task(_bg_gap_repair, limit)
     return RedirectResponse("/data", 303)
 
 

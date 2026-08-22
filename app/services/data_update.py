@@ -41,18 +41,12 @@ def _bootstrap_coverage(db) -> dict:
 
 
 def scan_readiness(db, check_calendar: bool = True) -> dict:
-    """Data-integrity gate for formal A/B/C scanning.
-
-    Strategy parameters are untouched. This gate only prevents cross-sectional
-    q40/breadth and peer-state calculations from running on a tiny or stale subset.
-    """
+    # Historical coverage and latest-day cross-sectional coverage are separate gates.
     provider = get_provider()
     latest = latest_trade_date(db)
     cov = _bootstrap_coverage(db)
 
     imported_ready_codes = 0
-    # External/legacy imports may not populate bootstrap_stocks. In that case,
-    # accept a sufficiently broad history universe instead of requiring bootstrap state.
     if cov["bootstrap_tracked"] == 0:
         sub = (
             select(DailyBar.code)
@@ -60,7 +54,9 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
             .having(func.count(DailyBar.id) >= settings.min_scan_history_bars)
             .subquery()
         )
-        imported_ready_codes = int(db.execute(select(func.count()).select_from(sub)).scalar_one() or 0)
+        imported_ready_codes = int(
+            db.execute(select(func.count()).select_from(sub)).scalar_one() or 0
+        )
 
     coverage_ok = (
         cov["bootstrap_coverage"] >= settings.min_scan_bootstrap_coverage
@@ -72,12 +68,13 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
     stale = True
     gaps: list[date] = []
     calendar_error = ""
+
     if latest is not None and check_calendar:
         try:
             expected_latest = provider.latest_completed_trade_date()
             stale = latest < expected_latest
             start = max(
-                latest - timedelta(days=settings.calendar_gap_check_days),
+                expected_latest - timedelta(days=settings.calendar_gap_check_days),
                 date.fromisoformat(settings.bootstrap_start_date),
             )
             expected = set(provider.trade_dates(start, expected_latest))
@@ -90,26 +87,64 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
             gaps = sorted(expected - stored)
         except Exception as e:
             calendar_error = str(e)
-            # Do not silently declare READY when the exchange-calendar audit failed.
             stale = True
     elif latest is not None:
+        expected_latest = latest
         stale = False
 
-    ready = bool(latest and coverage_ok and not stale and not gaps and not calendar_error)
+    target_day = expected_latest or latest
+    latest_strategy_rows = 0
+    latest_bar_coverage = 0.0
+    if target_day is not None and cov["active_nonst"] > 0:
+        latest_strategy_rows = int(db.execute(
+            select(func.count(distinct(DailyBar.code)))
+            .join(Stock, Stock.code == DailyBar.code)
+            .where(
+                DailyBar.trade_date == target_day,
+                Stock.is_st.is_(False),
+            )
+        ).scalar_one() or 0)
+        latest_bar_coverage = (
+            float(latest_strategy_rows) / float(cov["active_nonst"])
+        )
+
+    latest_coverage_ok = (
+        latest_bar_coverage >= settings.min_latest_bar_coverage
+        if target_day is not None and cov["active_nonst"] > 0
+        else False
+    )
+
+    ready = bool(
+        latest
+        and coverage_ok
+        and latest_coverage_ok
+        and not stale
+        and not gaps
+        and not calendar_error
+    )
+
     reasons = []
     if not latest:
         reasons.append("数据库尚无日线")
     if not coverage_ok:
         if cov["bootstrap_tracked"] > 0:
             reasons.append(
-                f"历史覆盖率 {cov['bootstrap_coverage']:.1%} < {settings.min_scan_bootstrap_coverage:.0%}"
+                f"历史池覆盖率 {cov['bootstrap_coverage']:.1%} < "
+                f"{settings.min_scan_bootstrap_coverage:.0%}"
             )
         else:
             reasons.append(
-                f"具备≥{settings.min_scan_history_bars}根日线的股票仅 {imported_ready_codes} < {settings.min_scan_stocks}"
+                f"具备≥{settings.min_scan_history_bars}根日线的股票仅 "
+                f"{imported_ready_codes} < {settings.min_scan_stocks}"
             )
     if stale and latest and expected_latest:
-        reasons.append(f"最新日线 {latest} 落后于应完成交易日 {expected_latest}")
+        reasons.append(f"数据库最大日线 {latest} 落后于应完成交易日 {expected_latest}")
+    if target_day is not None and not latest_coverage_ok:
+        reasons.append(
+            f"{target_day} 策略股日线覆盖 "
+            f"{latest_strategy_rows}/{cov['active_nonst']}="
+            f"{latest_bar_coverage:.1%} < {settings.min_latest_bar_coverage:.0%}"
+        )
     if gaps:
         sample = ", ".join(map(str, gaps[:5]))
         reasons.append(f"近期开市日存在 {len(gaps)} 个全局日期缺口：{sample}")
@@ -118,8 +153,14 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
 
     return {
         **cov,
+        "strategy_pool": cov["active_nonst"],
         "latest": latest,
         "expected_latest": expected_latest,
+        "latest_target": target_day,
+        "latest_strategy_rows": latest_strategy_rows,
+        "latest_bar_coverage": latest_bar_coverage,
+        "latest_coverage_ok": latest_coverage_ok,
+        "latest_coverage_threshold": settings.min_latest_bar_coverage,
         "imported_ready_codes": imported_ready_codes,
         "coverage_ok": coverage_ok,
         "stale": stale,
@@ -131,20 +172,22 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
 
 
 def data_stats(db) -> dict:
-    stocks = db.execute(select(func.count(Stock.code))).scalar_one()
-    bars = db.execute(select(func.count(DailyBar.id))).scalar_one()
+    stocks = int(db.execute(select(func.count(Stock.code))).scalar_one() or 0)
+    bars = int(db.execute(select(func.count(DailyBar.id))).scalar_one() or 0)
     earliest = db.execute(select(func.min(DailyBar.trade_date))).scalar_one_or_none()
     latest = db.execute(select(func.max(DailyBar.trade_date))).scalar_one_or_none()
-    latest_rows = 0
-    if latest:
-        latest_rows = db.execute(
-            select(func.count(DailyBar.id)).where(DailyBar.trade_date == latest)
-        ).scalar_one()
 
     ready = scan_readiness(db, check_calendar=True)
+    strategy_pool = int(ready.get("strategy_pool") or 0)
+
     return {
-        "stocks": int(stocks or 0), "bars": int(bars or 0), "earliest": earliest, "latest": latest,
-        "latest_rows": int(latest_rows or 0),
+        "stocks": stocks,
+        "bars": bars,
+        "earliest": earliest,
+        "latest": latest,
+        "strategy_pool": strategy_pool,
+        "excluded_metadata": max(0, stocks - strategy_pool),
+        "latest_rows": int(ready.get("latest_strategy_rows") or 0),
         **ready,
     }
 
@@ -358,6 +401,127 @@ def bootstrap_batch(db, start=None, end=None, limit=None, retry_errors: bool = F
         raise
 
 
+def repair_latest_gaps(db, limit=None):
+    # Repair per-stock history gaps up to the latest completed trading day.
+    # Zero rows are treated as a no-trade result (often suspension), not bootstrap failure.
+    active = db.execute(
+        select(func.count(DataUpdateRun.id)).where(DataUpdateRun.status == "running")
+    ).scalar_one()
+    if active:
+        return []
+
+    provider = get_provider()
+    target = provider.latest_completed_trade_date()
+    limit = int(limit or settings.gap_repair_batch_size)
+    timeout_seconds = max(10, int(settings.bootstrap_stock_timeout_seconds))
+    run = _new_run(
+        db,
+        f"{getattr(provider, 'name', 'provider')}-gap-repair",
+        None,
+        target,
+    )
+
+    latest_by_code = (
+        select(
+            DailyBar.code.label("code"),
+            func.max(DailyBar.trade_date).label("last_date"),
+        )
+        .group_by(DailyBar.code)
+        .subquery()
+    )
+
+    try:
+        rows = db.execute(
+            select(Stock.code, latest_by_code.c.last_date)
+            .outerjoin(latest_by_code, latest_by_code.c.code == Stock.code)
+            .where(
+                Stock.is_st.is_(False),
+                (
+                    latest_by_code.c.last_date.is_(None)
+                    | (latest_by_code.c.last_date < target)
+                ),
+            )
+            .order_by(Stock.code)
+            .limit(limit)
+        ).all()
+
+        run.stock_count = len(rows)
+        run.success_count = 0
+        run.failed_count = 0
+        db.commit()
+
+        if not rows:
+            run.status = "complete"
+            run.message = f"{target} 前不存在需要修复的策略股历史缺口"
+            run.finished_at = datetime.utcnow()
+            db.commit()
+            return []
+
+        results = []
+        errors = []
+        no_trade = 0
+        inserted_rows = 0
+        total = len(rows)
+
+        for idx, (code, last_date) in enumerate(rows, start=1):
+            code = str(code).zfill(6)
+            start = (
+                last_date + timedelta(days=1)
+                if last_date is not None
+                else date.fromisoformat(settings.bootstrap_start_date)
+            )
+
+            run.message = (
+                f"最新日线修复 {idx - 1}/{total}；当前 {code}；"
+                f"{start} → {target}；单股硬超时 {timeout_seconds}s"
+            )
+            db.commit()
+
+            try:
+                frame = _history_with_timeout(code, start, target, timeout_seconds)
+                n = upsert_bars(db, code, frame)
+                run.success_count += 1
+                inserted_rows += int(n or 0)
+                if n <= 0:
+                    no_trade += 1
+                    result_note = "无可补日线（可能停牌/区间内无交易）"
+                else:
+                    result_note = f"补入 {n} 行"
+                results.append((code, int(n or 0)))
+                run.message = (
+                    f"最新日线修复 {idx}/{total}；刚处理 {code}：{result_note}；"
+                    f"成功 {run.success_count}；失败 {run.failed_count}"
+                )
+            except Exception as e:
+                msg = f"{type(e).__name__}: {e}"[:1000]
+                errors.append(f"{code}: {msg}")
+                run.failed_count += 1
+                run.message = (
+                    f"最新日线修复 {idx}/{total}；{code} 失败；"
+                    f"成功 {run.success_count}；失败 {run.failed_count}；{msg[:240]}"
+                )
+            db.commit()
+
+        run.status = "ok" if not errors else "partial"
+        summary = (
+            f"修复批次完成：处理 {total} 只，成功 {run.success_count}，"
+            f"失败 {run.failed_count}；共补入 {inserted_rows} 行；"
+            f"无交易/可能停牌 {no_trade} 只。"
+        )
+        if errors:
+            summary += "\n" + "\n".join(errors[:50])
+        run.message = summary
+        run.finished_at = datetime.utcnow()
+        db.commit()
+        return results
+    except Exception as e:
+        run.status = "error"
+        run.message = f"{type(e).__name__}: {e}"
+        run.finished_at = datetime.utcnow()
+        db.commit()
+        raise
+
+
 def sync_daily_public(db, now: datetime | None = None):
     """Safe one-shot EOD update.
 
@@ -395,9 +559,10 @@ def sync_daily_public(db, now: datetime | None = None):
         run.stock_count = len(valid)
         run.success_count = n
         run.failed_count = max(0, len(valid) - n)
-        run.status = "ok" if n >= 3000 else "partial"
+        snapshot_coverage = (float(n) / float(len(valid))) if len(valid) else 0.0
+        run.status = "ok" if snapshot_coverage >= settings.min_latest_bar_coverage else "partial"
 
-        note = f"EOD snapshot {target}: {n} rows"
+        note = f"EOD snapshot {target}: {n}/{len(valid)} rows ({snapshot_coverage:.1%})"
         if before:
             try:
                 missed = provider.trade_dates(before + timedelta(days=1), target)
