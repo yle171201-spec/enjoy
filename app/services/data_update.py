@@ -4,10 +4,10 @@ from datetime import date, timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing as mp
 import pandas as pd
-from sqlalchemy import select, func, distinct, or_
+from sqlalchemy import select, func, distinct, or_, and_
 
 from ..config import settings
-from ..models import DataUpdateRun, Stock, DailyBar, BootstrapStock
+from ..models import DataUpdateRun, Stock, DailyBar, BootstrapStock, LatestDayAudit
 from ..providers import get_provider
 from ..providers.public_provider import DailySnapshotNotReady
 from .repository import upsert_stocks, upsert_bars, upsert_snapshot, latest_trade_date
@@ -40,8 +40,89 @@ def _bootstrap_coverage(db) -> dict:
     }
 
 
+def _latest_day_audit_stats(db, target_day: date | None, strategy_pool: int) -> dict:
+    if target_day is None or strategy_pool <= 0:
+        return {
+            "latest_strategy_rows": 0,
+            "raw_latest_bar_coverage": 0.0,
+            "latest_suspended": 0,
+            "latest_audit_problem": 0,
+            "latest_unresolved": strategy_pool,
+            "latest_tradable_pool": strategy_pool,
+            "latest_tradable_coverage": 0.0,
+            "latest_verified_coverage": 0.0,
+            "latest_verified_ok": False,
+        }
+
+    day_codes = (
+        select(DailyBar.code.label("code"))
+        .where(DailyBar.trade_date == target_day)
+        .subquery()
+    )
+
+    latest_rows = int(db.execute(
+        select(func.count(distinct(DailyBar.code)))
+        .join(Stock, Stock.code == DailyBar.code)
+        .where(
+            DailyBar.trade_date == target_day,
+            Stock.is_st.is_(False),
+        )
+    ).scalar_one() or 0)
+
+    suspended = int(db.execute(
+        select(func.count(distinct(LatestDayAudit.code)))
+        .join(Stock, Stock.code == LatestDayAudit.code)
+        .outerjoin(day_codes, day_codes.c.code == LatestDayAudit.code)
+        .where(
+            LatestDayAudit.target_date == target_day,
+            LatestDayAudit.status == "suspended",
+            Stock.is_st.is_(False),
+            day_codes.c.code.is_(None),
+        )
+    ).scalar_one() or 0)
+
+    problems = int(db.execute(
+        select(func.count(distinct(LatestDayAudit.code)))
+        .join(Stock, Stock.code == LatestDayAudit.code)
+        .outerjoin(day_codes, day_codes.c.code == LatestDayAudit.code)
+        .where(
+            LatestDayAudit.target_date == target_day,
+            LatestDayAudit.status.in_(("unknown", "invalid", "error")),
+            Stock.is_st.is_(False),
+            day_codes.c.code.is_(None),
+        )
+    ).scalar_one() or 0)
+
+    unresolved = max(0, int(strategy_pool) - latest_rows - suspended)
+    tradable_pool = max(0, int(strategy_pool) - suspended)
+    tradable_coverage = (
+        float(latest_rows) / float(tradable_pool)
+        if tradable_pool > 0
+        else 1.0
+    )
+    verified_coverage = min(
+        1.0,
+        float(latest_rows + suspended) / float(strategy_pool)
+    )
+    raw_coverage = float(latest_rows) / float(strategy_pool)
+
+    return {
+        "latest_strategy_rows": latest_rows,
+        "raw_latest_bar_coverage": raw_coverage,
+        "latest_suspended": suspended,
+        "latest_audit_problem": problems,
+        "latest_unresolved": unresolved,
+        "latest_tradable_pool": tradable_pool,
+        "latest_tradable_coverage": tradable_coverage,
+        "latest_verified_coverage": verified_coverage,
+        "latest_verified_ok": (
+            verified_coverage >= settings.min_latest_verified_coverage
+        ),
+    }
+
+
 def scan_readiness(db, check_calendar: bool = True) -> dict:
-    # Historical coverage and latest-day cross-sectional coverage are separate gates.
+    # Formal gate: historical coverage + tradable bar coverage + verified coverage.
     provider = get_provider()
     latest = latest_trade_date(db)
     cov = _bootstrap_coverage(db)
@@ -93,31 +174,20 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
         stale = False
 
     target_day = expected_latest or latest
-    latest_strategy_rows = 0
-    latest_bar_coverage = 0.0
-    if target_day is not None and cov["active_nonst"] > 0:
-        latest_strategy_rows = int(db.execute(
-            select(func.count(distinct(DailyBar.code)))
-            .join(Stock, Stock.code == DailyBar.code)
-            .where(
-                DailyBar.trade_date == target_day,
-                Stock.is_st.is_(False),
-            )
-        ).scalar_one() or 0)
-        latest_bar_coverage = (
-            float(latest_strategy_rows) / float(cov["active_nonst"])
-        )
+    audit = _latest_day_audit_stats(db, target_day, cov["active_nonst"])
 
     latest_coverage_ok = (
-        latest_bar_coverage >= settings.min_latest_bar_coverage
+        audit["latest_tradable_coverage"] >= settings.min_latest_bar_coverage
         if target_day is not None and cov["active_nonst"] > 0
         else False
     )
+    latest_verified_ok = audit["latest_verified_ok"]
 
     ready = bool(
         latest
         and coverage_ok
         and latest_coverage_ok
+        and latest_verified_ok
         and not stale
         and not gaps
         and not calendar_error
@@ -138,12 +208,23 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
                 f"{imported_ready_codes} < {settings.min_scan_stocks}"
             )
     if stale and latest and expected_latest:
-        reasons.append(f"数据库最大日线 {latest} 落后于应完成交易日 {expected_latest}")
+        reasons.append(
+            f"数据库最大日线 {latest} 落后于应完成交易日 {expected_latest}"
+        )
     if target_day is not None and not latest_coverage_ok:
         reasons.append(
-            f"{target_day} 策略股日线覆盖 "
-            f"{latest_strategy_rows}/{cov['active_nonst']}="
-            f"{latest_bar_coverage:.1%} < {settings.min_latest_bar_coverage:.0%}"
+            f"{target_day} 可交易股票日线覆盖 "
+            f"{audit['latest_strategy_rows']}/{audit['latest_tradable_pool']}="
+            f"{audit['latest_tradable_coverage']:.1%} < "
+            f"{settings.min_latest_bar_coverage:.0%}"
+        )
+    if target_day is not None and not latest_verified_ok:
+        reasons.append(
+            f"{target_day} 已核验覆盖 "
+            f"{audit['latest_strategy_rows'] + audit['latest_suspended']}/"
+            f"{cov['active_nonst']}={audit['latest_verified_coverage']:.1%} < "
+            f"{settings.min_latest_verified_coverage:.1%}；"
+            f"仍有 {audit['latest_unresolved']} 只未核清"
         )
     if gaps:
         sample = ", ".join(map(str, gaps[:5]))
@@ -153,14 +234,15 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
 
     return {
         **cov,
+        **audit,
         "strategy_pool": cov["active_nonst"],
         "latest": latest,
         "expected_latest": expected_latest,
         "latest_target": target_day,
-        "latest_strategy_rows": latest_strategy_rows,
-        "latest_bar_coverage": latest_bar_coverage,
+        "latest_bar_coverage": audit["raw_latest_bar_coverage"],
         "latest_coverage_ok": latest_coverage_ok,
         "latest_coverage_threshold": settings.min_latest_bar_coverage,
+        "latest_verified_threshold": settings.min_latest_verified_coverage,
         "imported_ready_codes": imported_ready_codes,
         "coverage_ok": coverage_ok,
         "stale": stale,
@@ -483,6 +565,197 @@ def repair_latest_gaps(db, limit=None, retry_errors: bool = False):
         run.finished_at = datetime.utcnow(); db.commit(); return []
     except Exception as e:
         run.status = "error"; run.message = f"{type(e).__name__}: {e}"; run.finished_at = datetime.utcnow(); db.commit(); raise
+
+
+def audit_latest_day(db, limit=None, retry_errors: bool = False):
+    # Audit and repair stocks that still lack the latest completed trading-day bar.
+    active = int(db.execute(
+        select(func.count(DataUpdateRun.id))
+        .where(DataUpdateRun.status == "running")
+    ).scalar_one() or 0)
+    if active:
+        return []
+
+    provider = get_provider()
+    target = provider.latest_completed_trade_date()
+    limit = int(limit or settings.latest_audit_batch_size)
+    workers = max(1, min(int(settings.gap_repair_workers), 2))
+    pname = f"{getattr(provider, 'name', 'provider')}-audit"
+    if retry_errors:
+        pname += "-retry"
+    run = _new_run(db, pname, target, target)
+
+    day_codes = (
+        select(DailyBar.code.label("code"))
+        .where(DailyBar.trade_date == target)
+        .subquery()
+    )
+
+    try:
+        q = (
+            select(Stock.code)
+            .outerjoin(day_codes, day_codes.c.code == Stock.code)
+            .outerjoin(
+                LatestDayAudit,
+                and_(
+                    LatestDayAudit.code == Stock.code,
+                    LatestDayAudit.target_date == target,
+                ),
+            )
+            .where(
+                Stock.is_st.is_(False),
+                day_codes.c.code.is_(None),
+            )
+        )
+        if retry_errors:
+            q = q.where(
+                LatestDayAudit.status.in_(("unknown", "invalid", "error"))
+            )
+        else:
+            q = q.where(LatestDayAudit.id.is_(None))
+
+        codes = [
+            str(x).zfill(6)
+            for x in db.execute(q.order_by(Stock.code).limit(limit)).scalars().all()
+        ]
+
+        run.stock_count = len(codes)
+        run.success_count = 0
+        run.failed_count = 0
+        run.message = (
+            f"最新交易日审计准备：{len(codes)}只；目标 {target}；"
+            f"并发 {workers}；空响应不会自动当作停牌"
+        )
+        db.commit()
+
+        if not codes:
+            run.status = "complete"
+            run.message = (
+                "当前没有新的待审计缺失股票"
+                if not retry_errors
+                else "当前没有需要重试的未知/错误审计"
+            )
+            run.finished_at = datetime.utcnow()
+            db.commit()
+            return []
+
+        def one(code: str):
+            if hasattr(provider, "audit_trade_day"):
+                return code, provider.audit_trade_day(code, target)
+            frame = provider.history(code, target, target)
+            return code, {
+                "status": "traded" if frame is not None and not frame.empty else "unknown",
+                "source": getattr(provider, "name", "provider"),
+                "frame": frame,
+                "message": "fallback audit path",
+            }
+
+        done = 0
+        repaired = 0
+        suspended = 0
+        unknown = 0
+        invalid = 0
+        errors = []
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(one, code): code for code in codes}
+            for fut in as_completed(futs):
+                code = futs[fut]
+                state = db.execute(
+                    select(LatestDayAudit).where(
+                        LatestDayAudit.code == code,
+                        LatestDayAudit.target_date == target,
+                    )
+                ).scalar_one_or_none()
+                if state is None:
+                    state = LatestDayAudit(code=code, target_date=target)
+                    db.add(state)
+
+                try:
+                    _, result = fut.result()
+                    status = str(result.get("status") or "unknown")
+                    source = str(result.get("source") or "")
+                    message = str(result.get("message") or "")[:1200]
+                    frame = result.get("frame")
+
+                    state.source = source
+                    state.message = message
+                    state.row_count = 0
+
+                    if status == "traded":
+                        n = upsert_bars(db, code, frame)
+                        if n > 0:
+                            state.status = "repaired"
+                            state.row_count = int(n)
+                            repaired += 1
+                            run.success_count += 1
+                        else:
+                            state.status = "invalid"
+                            state.message = (
+                                message + "; provider returned traded data but "
+                                "normalized DB upsert accepted 0 rows"
+                            )[:1200]
+                            invalid += 1
+                            run.failed_count += 1
+                    elif status == "suspended":
+                        state.status = "suspended"
+                        suspended += 1
+                        run.success_count += 1
+                    elif status == "invalid":
+                        state.status = "invalid"
+                        invalid += 1
+                        run.failed_count += 1
+                    else:
+                        state.status = "unknown"
+                        unknown += 1
+                        run.failed_count += 1
+
+                except Exception as e:
+                    msg = f"{type(e).__name__}: {e}"[:1200]
+                    state.status = "error"
+                    state.source = "audit"
+                    state.row_count = 0
+                    state.message = msg
+                    errors.append(f"{code}: {msg}")
+                    run.failed_count += 1
+
+                state.updated_at = datetime.utcnow()
+                done += 1
+                run.message = (
+                    f"最新交易日审计 {done}/{len(codes)}；刚处理 {code}；"
+                    f"补回 {repaired}；确认停牌 {suspended}；"
+                    f"未知 {unknown}；无效 {invalid}；错误 {len(errors)}"
+                )
+                db.commit()
+
+        audit_stats = _latest_day_audit_stats(
+            db,
+            target,
+            int(db.execute(
+                select(func.count(Stock.code)).where(Stock.is_st.is_(False))
+            ).scalar_one() or 0),
+        )
+        run.status = "ok" if run.failed_count == 0 else "partial"
+        run.message = (
+            f"审计批次完成：处理 {len(codes)} 只；补回 {repaired}；"
+            f"确认停牌 {suspended}；未知 {unknown}；无效 {invalid}；"
+            f"异常 {len(errors)}。当前实际日线 "
+            f"{audit_stats['latest_strategy_rows']}；确认停牌 "
+            f"{audit_stats['latest_suspended']}；仍未核清 "
+            f"{audit_stats['latest_unresolved']}。"
+        )
+        if errors:
+            run.message += "\n错误样例：\n" + "\n".join(errors[:20])
+        run.finished_at = datetime.utcnow()
+        db.commit()
+        return []
+
+    except Exception as e:
+        run.status = "error"
+        run.message = f"{type(e).__name__}: {e}"
+        run.finished_at = datetime.utcnow()
+        db.commit()
+        raise
 
 
 def sync_daily_public(db, now: datetime | None = None):

@@ -1,11 +1,12 @@
 {% extends "base.html" %}
 {% block title %}数据管理{% endblock %}
 {% block content %}
+
 <section class="hero">
   <div>
     <span class="eyebrow">PUBLIC DATA PIPELINE</span>
     <h1>数据管理</h1>
-    <p>无需 Tushare Token。V2.1.7 将最新日线修复改为稳定优先：2路并发、AKShare自动重试，任何AK异常都会回退BaoStock；已完成数据不重复下载。</p>
+    <p>V2.1.8 将“最新交易日有K线”和“已确认停牌”分开核验。空响应不再直接等同于停牌；缺失股票会逐只审计，能补回的补回，只有 BaoStock 明确 tradestatus=0 才计为确认停牌。</p>
   </div>
   <div class="status">
     <div>数据源 <b>{{ provider }}</b></div>
@@ -19,48 +20,59 @@
   <div><span>股票元数据</span><b>{{ '{:,}'.format(stats.stocks) }}</b></div>
   <div><span>策略股票池</span><b id="metric-strategy-pool">{{ '{:,}'.format(stats.strategy_pool) }}</b></div>
   <div><span>历史初始化</span><b id="metric-bootstrap-done">{{ '{:,}'.format(stats.bootstrap_done) }}/{{ '{:,}'.format(stats.strategy_pool) }}</b></div>
-  <div><span>历史池覆盖率</span><b id="metric-coverage">{{ '{:.1%}'.format(stats.bootstrap_coverage) }}</b></div>
-  <div><span>最新日线覆盖</span><b id="metric-latest-coverage" class="{{ 'ok' if stats.latest_coverage_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_bar_coverage) }}</b></div>
-  <div><span>初始化错误</span><b id="metric-errors" class="{{'warn-text' if stats.bootstrap_errors else 'ok'}}">{{ stats.bootstrap_errors }}</b></div>
-  <div><span>正式ABC扫描</span><b id="metric-scan" class="{{'ok' if stats.scan_ready else 'warn-text'}}">{{ 'READY' if stats.scan_ready else 'BLOCKED' }}</b></div>
+  <div><span>历史池覆盖率</span><b id="metric-history-pct">{{ '{:.1%}'.format(stats.bootstrap_coverage) }}</b></div>
+  <div><span>当日实际K线</span><b id="metric-latest-rows">{{ '{:,}'.format(stats.latest_strategy_rows) }}</b></div>
+  <div><span>已核验覆盖</span><b id="metric-verified-pct" class="{{ 'ok' if stats.latest_verified_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_verified_coverage) }}</b></div>
+  <div><span>仍未核清</span><b id="metric-unresolved" class="{{ 'warn-text' if stats.latest_unresolved else 'ok' }}">{{ stats.latest_unresolved }}</b></div>
+  <div><span>正式ABC扫描</span><b id="metric-scan" class="{{ 'ok' if stats.scan_ready else 'warn-text' }}">{{ 'READY' if stats.scan_ready else 'BLOCKED' }}</b></div>
 </div>
 
 <section class="note">
-  <b>股票池说明：</b>
-  元数据共 {{ '{:,}'.format(stats.stocks) }} 只；当前 ABC 策略股票池 {{ '{:,}'.format(stats.strategy_pool) }} 只；
-  其余 {{ '{:,}'.format(stats.excluded_metadata) }} 只主要为 ST 等不进入当前策略历史池的股票。
-  因此“历史池 100%”的分母是策略股票池，不是全部元数据。
+  <b>为什么“没有待初始化股票”但最新日线仍可能不满：</b>
+  历史初始化只表示策略股票池已经建立过历史序列；它和“目标交易日是否有K线”是两件事。
+  V2.1.8 以后，正式扫描看的是最新交易日审计结果，而不是历史初始化按钮。
 </section>
 
 <section class="note">
   <b>完整性状态：</b>
   {% if stats.scan_ready %}
-    <span id="integrity-status" class="ok">READY。历史池、最新交易日横截面覆盖与交易日历检查均通过，可以运行正式 A/B/C 扫描。</span>
+    <span id="integrity-status" class="ok">READY。历史池、最新交易日可交易覆盖、最新交易日核验覆盖和交易日历均通过，可以运行正式 A/B/C 扫描。</span>
   {% else %}
     <span id="integrity-status" class="warn-text">BLOCKED：{{ stats.scan_block_reason }}</span>
   {% endif %}
 </section>
 
 <section class="panel">
-  <span class="eyebrow">LATEST-DAY INTEGRITY</span>
-  <h2>最新交易日完整性</h2>
+  <span class="eyebrow">LATEST-DAY AUDIT</span>
+  <h2>最新交易日审计与精准补漏</h2>
   <div class="metrics">
-    <div><span>目标交易日</span><b id="latest-target">{{ stats.expected_latest or stats.latest or '-' }}</b></div>
+    <div><span>目标交易日</span><b>{{ stats.expected_latest or stats.latest or '-' }}</b></div>
     <div><span>策略股票池</span><b id="latest-pool">{{ '{:,}'.format(stats.strategy_pool) }}</b></div>
-    <div><span>当日有日线</span><b id="latest-rows">{{ '{:,}'.format(stats.latest_strategy_rows) }}</b></div>
-    <div><span>最新覆盖率</span><b id="latest-pct" class="{{ 'ok' if stats.latest_coverage_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_bar_coverage) }}</b></div>
-    <div><span>扫描门槛</span><b>{{ '{:.0%}'.format(stats.latest_coverage_threshold) }}</b></div>
+    <div><span>实际有K线</span><b id="latest-rows">{{ '{:,}'.format(stats.latest_strategy_rows) }}</b></div>
+    <div><span>确认停牌</span><b id="latest-suspended">{{ '{:,}'.format(stats.latest_suspended) }}</b></div>
+    <div><span>仍未核清</span><b id="latest-unresolved" class="{{ 'warn-text' if stats.latest_unresolved else 'ok' }}">{{ '{:,}'.format(stats.latest_unresolved) }}</b></div>
+    <div><span>可交易覆盖率</span><b id="latest-tradable-pct" class="{{ 'ok' if stats.latest_coverage_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_tradable_coverage) }}</b></div>
+    <div><span>已核验覆盖率</span><b id="latest-verified-pct" class="{{ 'ok' if stats.latest_verified_ok else 'warn-text' }}">{{ '{:.1%}'.format(stats.latest_verified_coverage) }}</b></div>
+    <div><span>未知/无效/错误</span><b id="latest-problems" class="{{ 'warn-text' if stats.latest_audit_problem else 'ok' }}">{{ stats.latest_audit_problem }}</b></div>
   </div>
+
   <p class="muted">
-    最新交易日不要求机械达到 100%：停牌股票当天本来可能没有 K 线。正式扫描要求最新日线覆盖至少
-    {{ '{:.0%}'.format(stats.latest_coverage_threshold) }}，避免只用半个市场计算 q40、breadth 和 peer-state。
+    正式扫描要求：可交易股票日线覆盖 ≥ {{ '{:.0%}'.format(stats.latest_coverage_threshold) }}，
+    且“实际K线 + 明确确认停牌”的核验覆盖 ≥ {{ '{:.1%}'.format(stats.latest_verified_threshold) }}。
+    这样既不会要求停牌股凭空产生K线，也不会把数据源空响应误当成停牌。
   </p>
-  <form method="post" action="/admin/repair-latest" class="toolbar compact-toolbar">
-    <label>本批修复股票数<input id="repair-limit" name="limit" type="number" value="{{ gap_batch_size }}" min="1" max="500" {% if bootstrap_busy %}disabled{% endif %}></label>
-    <button id="repair-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else '修复最新日线缺口' }}</button>
+
+  <form method="post" action="/admin/audit-latest" class="toolbar compact-toolbar">
+    <label>本批审计股票数<input id="audit-limit" name="limit" type="number" value="{{ audit_batch_size }}" min="1" max="500" {% if bootstrap_busy %}disabled{% endif %}></label>
+    <button id="audit-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else '审计并补齐缺失股票' }}</button>
   </form>
-  <p class="muted">V2.1.7 使用 2 路稳定并发；AKShare 每只最多尝试2次，异常或空数据再由 BaoStock 兜底。已确认无交易/停牌的股票不会重复占坑；已有的8.21数据不会重新下载。</p>
-  <form method="post" action="/admin/repair-latest-errors" class="toolbar compact-toolbar" style="margin-top:12px"><label>错误重试数<input name="limit" type="number" value="100" min="1" max="200" {% if bootstrap_busy %}disabled{% endif %}></label><button type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试修复错误</button></form>
+
+  <form method="post" action="/admin/audit-latest-errors" class="toolbar compact-toolbar" style="margin-top:12px">
+    <label>未知/错误重试数<input id="audit-retry-limit" name="limit" type="number" value="100" min="1" max="200" {% if bootstrap_busy %}disabled{% endif %}></label>
+    <button id="audit-retry-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试未知/错误</button>
+  </form>
+
+  <p class="muted">建议先反复执行“审计并补齐缺失股票”，直到显示没有新的待审计股票；若仍有未核清，再执行“重试未知/错误”。达到门槛后刷新页面做交易日历最终核验。</p>
 </section>
 
 <section class="panel">
@@ -74,7 +86,6 @@
     <div><span>预计占用率</span><b>{{ '{:.1%}'.format(storage.projected_pct) if storage.projected_pct is not none else '-' }}</b></div>
     <div><span>容量判断</span><b class="{{ 'ok' if storage.level == 'SAFE' else 'warn-text' }}">{{ storage.level_cn }}</b></div>
   </div>
-  <p class="muted">容量预测仍基于真实 PostgreSQL 占用；历史初始化完成后，预计值会逐步接近当前实际占用。</p>
   {% else %}
   <p class="muted">暂时无法读取数据库容量{% if storage.error %}：{{ storage.error }}{% endif %}</p>
   {% endif %}
@@ -84,25 +95,24 @@
   <section class="panel">
     <span class="eyebrow">FIRST BOOTSTRAP</span>
     <h2>历史初始化（策略股票池）</h2>
-    <p class="muted">这里只初始化当前策略股票池，不要求把排除的 ST 等股票也下载。V2.1.3 的 60 秒硬超时、错误隔离和断点续传继续保留。</p>
+    <p class="muted">这一块只负责历史序列。历史池已经 100% 时，不需要因为最新交易日缺K线而重新初始化。</p>
     <form method="post" action="/admin/bootstrap" class="toolbar compact-toolbar">
       <label>本批股票数<input id="bootstrap-limit" name="limit" type="number" value="{{ batch_size }}" min="1" max="500" {% if bootstrap_busy or stats.bootstrap_coverage >= 0.9999 %}disabled{% endif %}></label>
       <button id="bootstrap-button" type="submit" {% if bootstrap_busy or stats.bootstrap_coverage >= 0.9999 %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else ('历史初始化已完成' if stats.bootstrap_coverage >= 0.9999 else '后台初始化下一批') }}</button>
     </form>
     <form id="retry-form" method="post" action="/admin/bootstrap-errors" class="toolbar compact-toolbar" style="margin-top:12px;{% if not stats.bootstrap_errors %}display:none{% endif %}">
-      <label>错误重试数<input id="retry-limit" name="limit" type="number" value="20" min="1" max="100" {% if bootstrap_busy %}disabled{% endif %}></label>
-      <button id="retry-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试错误队列</button>
+      <label>历史错误重试数<input id="retry-limit" name="limit" type="number" value="20" min="1" max="100" {% if bootstrap_busy %}disabled{% endif %}></label>
+      <button id="retry-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试历史错误</button>
     </form>
   </section>
 
   <section class="panel">
     <span class="eyebrow">POST-CLOSE DAILY</span>
     <h2>收盘后更新 + ABC扫描</h2>
-    <p class="muted">V2.1.7 仍只在“当天为 A 股交易日 + 北京时间16:10以后”允许实时快照写入当日日线；并且快照覆盖率不足 {{ '{:.0%}'.format(stats.latest_coverage_threshold) }} 时不会触发正式扫描。</p>
+    <p class="muted">日常交易日收盘后仍走全市场快照；正式扫描内部会再次调用完整性门，任何一项未通过都不会生成正式选股。</p>
     <form method="post" action="/admin/daily-update">
       <button type="submit" class="primary">立即执行一次安全盘后更新</button>
     </form>
-    <p class="muted">正式版 Render Cron 在工作日北京时间18:30自动执行；节假日会被交易日历安全门跳过。</p>
   </section>
 </div>
 
@@ -115,7 +125,7 @@
 
 {% if errors %}
 <section>
-  <div class="section-head"><div><span class="eyebrow">RETRY QUEUE</span><h2>最近初始化错误</h2><p class="muted">这些股票已从正常初始化队列隔离，不会阻塞后续股票。</p></div></div>
+  <div class="section-head"><div><span class="eyebrow">HISTORY RETRY QUEUE</span><h2>最近历史初始化错误</h2></div></div>
   <div class="table-wrap"><table><thead><tr><th>代码</th><th>状态</th><th>行数</th><th>更新时间</th><th>信息</th></tr></thead><tbody>
   {% for e in errors %}<tr><td>{{e.code}}</td><td>{{e.status}}</td><td>{{e.row_count}}</td><td>{{e.updated_at}}</td><td>{{e.message}}</td></tr>{% endfor %}
   </tbody></table></div>
@@ -123,24 +133,109 @@
 {% endif %}
 
 <section class="note">
-  <b>当前测试环境提示：</b>Render Free Postgres 只有 1 GB 且 30 天到期。当前测试库可验证完整数据链路，但长期正式运行仍建议迁移到持久化数据库。
+  <b>当前测试环境提示：</b>Render Free Postgres 只有 1 GB 且 30 天到期。测试库可验证完整链路，长期正式运行仍建议迁移到持久化数据库。
 </section>
 
 <script>
 (() => {
-  const ACTIVE_MS=3000, IDLE_MS=15000, HIDDEN_MS=15000;
-  const TARGET_DATE="{{ stats.expected_latest or stats.latest or '' }}";
-  let timer=null, polls=0, lastBusy={{ 'true' if bootstrap_busy else 'false' }};
-  const el=id=>document.getElementById(id);
-  const fmtInt=v=>Number(v||0).toLocaleString('zh-CN');
-  const fmtPct=v=>`${(Number(v||0)*100).toFixed(1)}%`;
-  function setBusy(b){ ['bootstrap-limit','bootstrap-button','retry-limit','retry-button','repair-limit','repair-button'].forEach(id=>{const n=el(id);if(n)n.disabled=!!b;}); if(el('repair-button'))el('repair-button').textContent=b?'数据任务运行中':'修复最新日线缺口'; }
-  function apply(d){ const u=d.update; if(u){ if(el('live-task-summary'))el('live-task-summary').textContent=`${u.status} ｜ ${u.provider||'-'} ｜ ${u.start_date||'-'} → ${u.end_date||'-'} ｜ 成功 ${fmtInt(u.success_count)}/${fmtInt(u.stock_count)} ｜ 失败 ${fmtInt(u.failed_count)}`; if(el('live-running-hint'))el('live-running-hint').textContent=u.status==='running'?' ｜ 正在执行，页面每 3 秒自动更新':''; if(el('live-task-message'))el('live-task-message').textContent=u.message||''; }
-    if(d.stats){const s=d.stats,p=Number(s.strategy_pool||0),r=Number(s.latest_strategy_rows||0),pct=Number(s.latest_bar_coverage||0); if(el('metric-bars'))el('metric-bars').textContent=fmtInt(s.bars); if(el('metric-bootstrap-done'))el('metric-bootstrap-done').textContent=`${fmtInt(s.bootstrap_done)}/${fmtInt(p)}`; if(el('metric-coverage'))el('metric-coverage').textContent=fmtPct(s.bootstrap_coverage); if(el('latest-rows'))el('latest-rows').textContent=fmtInt(r); if(el('latest-pct'))el('latest-pct').textContent=fmtPct(pct); if(el('metric-latest-coverage'))el('metric-latest-coverage').textContent=fmtPct(pct);}
-    setBusy(!!d.data_busy); }
-  function schedule(ms){clearTimeout(timer);timer=setTimeout(poll,document.hidden?Math.max(ms,HIDDEN_MS):ms);}
-  async function poll(){polls++; const full=(polls===1)||(lastBusy&&polls%10===0)||(!lastBusy&&polls%4===0); const parts=[]; if(TARGET_DATE)parts.push(`target=${encodeURIComponent(TARGET_DATE)}`); if(full)parts.push('full=1'); const qs=parts.length?'?'+parts.join('&'):''; const status=el('live-poll-status'); try{const res=await fetch('/api/data/progress'+qs,{cache:'no-store',headers:{Accept:'application/json'}}); if(!res.ok)throw new Error(); const d=await res.json(); apply(d); if(lastBusy&&!d.data_busy)polls=0; lastBusy=!!d.data_busy; if(status){status.textContent=`自动刷新：已连接 · ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;status.className='ok';} schedule(d.data_busy?ACTIVE_MS:IDLE_MS);}catch(e){if(status){status.textContent='自动刷新：连接重试中';status.className='warn-text';}schedule(document.hidden?HIDDEN_MS:5000);}}
-  document.addEventListener('visibilitychange',()=>{if(!document.hidden){polls=0;clearTimeout(timer);poll();}}); poll();
+  const ACTIVE_MS = 3000, IDLE_MS = 15000, HIDDEN_MS = 15000;
+  const TARGET_DATE = "{{ stats.expected_latest or stats.latest or '' }}";
+  const HISTORY_COMPLETE = {{ 'true' if stats.bootstrap_coverage >= 0.9999 else 'false' }};
+  let timer = null, polls = 0, lastBusy = {{ 'true' if bootstrap_busy else 'false' }};
+  const el = id => document.getElementById(id);
+  const fmtInt = v => Number(v || 0).toLocaleString('zh-CN');
+  const fmtPct = v => `${(Number(v || 0) * 100).toFixed(1)}%`;
+
+  function setBusy(busy) {
+    ['audit-limit','audit-button','audit-retry-limit','audit-retry-button','bootstrap-limit','bootstrap-button','retry-limit','retry-button'].forEach(id => {
+      const n = el(id);
+      if (n) n.disabled = !!busy || (HISTORY_COMPLETE && id.startsWith('bootstrap'));
+    });
+    if (el('audit-button')) el('audit-button').textContent = busy ? '数据任务运行中' : '审计并补齐缺失股票';
+    if (el('bootstrap-button')) el('bootstrap-button').textContent = busy ? '数据任务运行中' : (HISTORY_COMPLETE ? '历史初始化已完成' : '后台初始化下一批');
+  }
+
+  function apply(data) {
+    const u = data.update;
+    if (u) {
+      if (el('live-task-summary')) el('live-task-summary').textContent = `${u.status} ｜ ${u.provider || '-'} ｜ ${u.start_date || '-'} → ${u.end_date || '-'} ｜ 成功 ${fmtInt(u.success_count)}/${fmtInt(u.stock_count)} ｜ 失败 ${fmtInt(u.failed_count)}`;
+      if (el('live-running-hint')) el('live-running-hint').textContent = u.status === 'running' ? ' ｜ 正在执行，页面每 3 秒自动更新' : '';
+      if (el('live-task-message')) el('live-task-message').textContent = u.message || '';
+    }
+
+    if (data.stats) {
+      const s = data.stats, pool = Number(s.strategy_pool || 0), rows = Number(s.latest_strategy_rows || 0);
+      const suspended = Number(s.latest_suspended || 0), unresolved = Number(s.latest_unresolved || 0);
+      const problems = Number(s.latest_audit_problem || 0), tradablePct = Number(s.latest_tradable_coverage || 0);
+      const verifiedPct = Number(s.latest_verified_coverage || 0);
+
+      if (el('metric-bootstrap-done')) el('metric-bootstrap-done').textContent = `${fmtInt(s.bootstrap_done)}/${fmtInt(pool)}`;
+      if (el('metric-history-pct')) el('metric-history-pct').textContent = fmtPct(s.bootstrap_coverage);
+      if (el('metric-latest-rows')) el('metric-latest-rows').textContent = fmtInt(rows);
+      if (el('metric-verified-pct')) el('metric-verified-pct').textContent = fmtPct(verifiedPct);
+      if (el('metric-unresolved')) el('metric-unresolved').textContent = fmtInt(unresolved);
+      if (el('latest-pool')) el('latest-pool').textContent = fmtInt(pool);
+      if (el('latest-rows')) el('latest-rows').textContent = fmtInt(rows);
+      if (el('latest-suspended')) el('latest-suspended').textContent = fmtInt(suspended);
+      if (el('latest-unresolved')) el('latest-unresolved').textContent = fmtInt(unresolved);
+      if (el('latest-problems')) el('latest-problems').textContent = fmtInt(problems);
+      if (el('latest-tradable-pct')) el('latest-tradable-pct').textContent = fmtPct(tradablePct);
+      if (el('latest-verified-pct')) el('latest-verified-pct').textContent = fmtPct(verifiedPct);
+
+      if (el('metric-scan') && el('metric-scan').textContent !== 'READY') {
+        const historyOk = Number(s.bootstrap_coverage || 0) >= Number(s.history_threshold || 0.95);
+        const tradableOk = tradablePct >= Number(s.latest_threshold || 0.95);
+        const verifiedOk = verifiedPct >= Number(s.verified_threshold || 0.995);
+        el('metric-scan').textContent = historyOk && tradableOk && verifiedOk ? '待最终核验' : 'BLOCKED';
+        el('metric-scan').className = 'warn-text';
+      }
+    }
+    setBusy(!!data.data_busy);
+  }
+
+  function schedule(ms) {
+    clearTimeout(timer);
+    timer = setTimeout(poll, document.hidden ? Math.max(ms, HIDDEN_MS) : ms);
+  }
+
+  async function poll() {
+    polls++;
+    const full = polls === 1 || (lastBusy && polls % 10 === 0) || (!lastBusy && polls % 4 === 0);
+    const parts = [];
+    if (TARGET_DATE) parts.push(`target=${encodeURIComponent(TARGET_DATE)}`);
+    if (full) parts.push('full=1');
+    const qs = parts.length ? `?${parts.join('&')}` : '';
+    const status = el('live-poll-status');
+
+    try {
+      const res = await fetch(`/api/data/progress${qs}`, {cache:'no-store', headers:{Accept:'application/json'}});
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      apply(data);
+      if (lastBusy && !data.data_busy) polls = 0;
+      lastBusy = !!data.data_busy;
+      if (status) {
+        status.textContent = `自动刷新：已连接 · ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;
+        status.className = 'ok';
+      }
+      schedule(data.data_busy ? ACTIVE_MS : IDLE_MS);
+    } catch (e) {
+      if (status) {
+        status.textContent = '自动刷新：连接重试中';
+        status.className = 'warn-text';
+      }
+      schedule(document.hidden ? HIDDEN_MS : 5000);
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      polls = 0;
+      clearTimeout(timer);
+      poll();
+    }
+  });
+  poll();
 })();
 </script>
 

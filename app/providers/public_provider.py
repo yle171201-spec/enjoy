@@ -184,6 +184,117 @@ class PublicDataProvider(DataProvider):
             ) from e
 
 
+    def audit_trade_day(self, code: str, target: date) -> dict:
+        # Audit one missing latest-day bar without assuming empty == suspended.
+        # Only an explicit BaoStock tradestatus=0 is accepted as suspension.
+        code = str(code).zfill(6)
+        cols = ["date", "open", "high", "low", "close", "volume", "amount", "turnover"]
+        empty = pd.DataFrame(columns=cols)
+
+        ak_notes = []
+        for attempt in range(1, 3):
+            try:
+                x = self._history_akshare(code, target, target)
+                if x is not None and not x.empty:
+                    x = x[pd.to_datetime(x["date"], errors="coerce").dt.date == target].copy()
+                    if not x.empty:
+                        return {
+                            "status": "traded",
+                            "source": "akshare",
+                            "frame": x,
+                            "message": f"AKShare exact-day bar: {target}",
+                        }
+                ak_notes.append(f"attempt{attempt}:empty")
+                break
+            except Exception as e:
+                ak_notes.append(f"attempt{attempt}:{type(e).__name__}:{e}")
+                if attempt < 2:
+                    _time.sleep(1.0)
+
+        bs_code = ("sh." if code.startswith("6") else "sz.") + code
+        try:
+            with _BaoSession():
+                rs = bs.query_history_k_data_plus(
+                    bs_code,
+                    _FIELDS,
+                    start_date=target.isoformat(),
+                    end_date=target.isoformat(),
+                    frequency="d",
+                    adjustflag="3",
+                )
+                rows = []
+                while (rs.error_code == "0") & rs.next():
+                    rows.append(rs.get_row_data())
+                if rs.error_code != "0":
+                    raise RuntimeError(rs.error_msg)
+                raw = pd.DataFrame(rows, columns=rs.fields)
+
+            if raw.empty:
+                return {
+                    "status": "unknown",
+                    "source": "akshare+baostock",
+                    "frame": empty,
+                    "message": "AKShare=" + " | ".join(ak_notes) + "; BaoStock exact-day returned no row",
+                }
+
+            statuses = {
+                str(v).strip()
+                for v in raw.get("tradestatus", pd.Series(dtype=str)).tolist()
+                if str(v).strip()
+            }
+            active = raw[raw["tradestatus"].astype(str).str.strip() == "1"].copy()
+
+            if active.empty:
+                if statuses and statuses.issubset({"0"}):
+                    return {
+                        "status": "suspended",
+                        "source": "baostock",
+                        "frame": empty,
+                        "message": f"BaoStock explicitly reported tradestatus=0 on {target}",
+                    }
+                return {
+                    "status": "unknown",
+                    "source": "baostock",
+                    "frame": empty,
+                    "message": f"BaoStock returned ambiguous tradestatus={sorted(statuses)}",
+                }
+
+            active["date"] = pd.to_datetime(active["date"], errors="coerce")
+            active["turnover"] = _to_num(active["turn"]) / 100.0
+            for c in ["open", "high", "low", "close", "volume", "amount"]:
+                active[c] = _to_num(active[c])
+            active = active[(active["close"] > 0) & (active["open"] > 0)]
+            frame = (
+                active[cols]
+                .dropna(subset=["date", "close"])
+                .sort_values("date")
+                .reset_index(drop=True)
+            )
+            if frame.empty:
+                return {
+                    "status": "invalid",
+                    "source": "baostock",
+                    "frame": empty,
+                    "message": "BaoStock reported tradestatus=1 but normalized OHLCV was invalid",
+                }
+            return {
+                "status": "traded",
+                "source": "baostock",
+                "frame": frame,
+                "message": f"BaoStock exact-day traded bar: {target}",
+            }
+        except Exception as e:
+            return {
+                "status": "unknown",
+                "source": "akshare+baostock",
+                "frame": empty,
+                "message": (
+                    "AKShare=" + " | ".join(ak_notes)
+                    + f"; BaoStock={type(e).__name__}:{e}"
+                )[:1200],
+            }
+
+
     def trade_dates(self, start: date, end: date) -> list[date]:
         try:
             with _BaoSession():

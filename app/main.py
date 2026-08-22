@@ -12,7 +12,7 @@ from sqlalchemy import select, func, distinct, text
 
 from .config import settings
 from .db import init_db, db_session, SessionLocal
-from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock
+from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock, LatestDayAudit
 from .auth import valid_password, make_cookie, is_logged_in, COOKIE
 from .services.repository import latest_trade_date, latest_prices
 from .services.strategy_service import run_full_scan
@@ -20,7 +20,7 @@ from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.chart_service import build_stock_chart
 from .services.data_update import (
     data_stats, bootstrap_batch, sync_daily_public, scan_readiness,
-    recover_interrupted_runs, repair_latest_gaps,
+    recover_interrupted_runs, repair_latest_gaps, audit_latest_day,
 )
 
 BASE = Path(__file__).resolve().parent
@@ -41,6 +41,14 @@ def _bg_gap_repair(limit: int, retry_errors: bool = False):
     db = SessionLocal()
     try:
         repair_latest_gaps(db, limit=limit, retry_errors=retry_errors)
+    finally:
+        db.close()
+
+
+def _bg_latest_audit(limit: int, retry_errors: bool = False):
+    db = SessionLocal()
+    try:
+        audit_latest_day(db, limit=limit, retry_errors=retry_errors)
     finally:
         db.close()
 
@@ -136,11 +144,14 @@ def _db_storage_stats(db, stats: dict) -> dict:
 
 
 def _live_data_progress(db, target: date | None = None, full: bool = False) -> dict:
-    update = db.execute(select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)).scalar_one_or_none()
+    update = db.execute(
+        select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)
+    ).scalar_one_or_none()
     update_payload = None
     if update is not None:
         update_payload = {
-            "status": update.status, "provider": update.provider,
+            "status": update.status,
+            "provider": update.provider,
             "start_date": str(update.start_date) if update.start_date else None,
             "end_date": str(update.end_date) if update.end_date else None,
             "stock_count": int(update.stock_count or 0),
@@ -148,28 +159,91 @@ def _live_data_progress(db, target: date | None = None, full: bool = False) -> d
             "failed_count": int(update.failed_count or 0),
             "message": update.message or "",
         }
+
     payload = {"update": update_payload, "data_busy": _data_job_busy(db)}
     if not full:
         return payload
 
     stocks = int(db.execute(select(func.count(Stock.code))).scalar_one() or 0)
     bars = int(db.execute(select(func.count(DailyBar.id))).scalar_one() or 0)
-    pool = int(db.execute(select(func.count(Stock.code)).where(Stock.is_st.is_(False))).scalar_one() or 0)
-    done = int(db.execute(select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "ok")).scalar_one() or 0)
-    errs = int(db.execute(select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "error")).scalar_one() or 0)
-    latest = db.execute(select(func.max(DailyBar.trade_date))).scalar_one_or_none()
-    target_day = target or latest
+    pool = int(db.execute(
+        select(func.count(Stock.code)).where(Stock.is_st.is_(False))
+    ).scalar_one() or 0)
+    done = int(db.execute(
+        select(func.count(BootstrapStock.code))
+        .where(BootstrapStock.status == "ok")
+    ).scalar_one() or 0)
+    errs = int(db.execute(
+        select(func.count(BootstrapStock.code))
+        .where(BootstrapStock.status == "error")
+    ).scalar_one() or 0)
+
+    target_day = target or db.execute(
+        select(func.max(DailyBar.trade_date))
+    ).scalar_one_or_none()
+
     latest_rows = 0
-    if target_day and pool:
-        latest_rows = int(db.execute(select(func.count(distinct(DailyBar.code))).join(Stock, Stock.code == DailyBar.code).where(DailyBar.trade_date == target_day, Stock.is_st.is_(False))).scalar_one() or 0)
+    suspended = 0
+    problems = 0
+    if target_day is not None and pool:
+        day_codes = (
+            select(DailyBar.code.label("code"))
+            .where(DailyBar.trade_date == target_day)
+            .subquery()
+        )
+        latest_rows = int(db.execute(
+            select(func.count(distinct(DailyBar.code)))
+            .join(Stock, Stock.code == DailyBar.code)
+            .where(
+                DailyBar.trade_date == target_day,
+                Stock.is_st.is_(False),
+            )
+        ).scalar_one() or 0)
+        suspended = int(db.execute(
+            select(func.count(distinct(LatestDayAudit.code)))
+            .join(Stock, Stock.code == LatestDayAudit.code)
+            .outerjoin(day_codes, day_codes.c.code == LatestDayAudit.code)
+            .where(
+                LatestDayAudit.target_date == target_day,
+                LatestDayAudit.status == "suspended",
+                Stock.is_st.is_(False),
+                day_codes.c.code.is_(None),
+            )
+        ).scalar_one() or 0)
+        problems = int(db.execute(
+            select(func.count(distinct(LatestDayAudit.code)))
+            .join(Stock, Stock.code == LatestDayAudit.code)
+            .outerjoin(day_codes, day_codes.c.code == LatestDayAudit.code)
+            .where(
+                LatestDayAudit.target_date == target_day,
+                LatestDayAudit.status.in_(("unknown", "invalid", "error")),
+                Stock.is_st.is_(False),
+                day_codes.c.code.is_(None),
+            )
+        ).scalar_one() or 0)
+
+    unresolved = max(0, pool - latest_rows - suspended)
+    tradable_pool = max(0, pool - suspended)
+    tradable_cov = latest_rows / tradable_pool if tradable_pool else 1.0
+    verified_cov = min(1.0, (latest_rows + suspended) / pool) if pool else 0.0
+
     payload["stats"] = {
-        "stocks": stocks, "bars": bars, "strategy_pool": pool,
-        "bootstrap_done": done, "bootstrap_errors": errs,
-        "bootstrap_coverage": (done/pool if pool else 0.0),
+        "stocks": stocks,
+        "bars": bars,
+        "strategy_pool": pool,
+        "bootstrap_done": done,
+        "bootstrap_errors": errs,
+        "bootstrap_coverage": done / pool if pool else 0.0,
         "latest_strategy_rows": latest_rows,
-        "latest_bar_coverage": (latest_rows/pool if pool else 0.0),
+        "latest_suspended": suspended,
+        "latest_audit_problem": problems,
+        "latest_unresolved": unresolved,
+        "latest_tradable_pool": tradable_pool,
+        "latest_tradable_coverage": tradable_cov,
+        "latest_verified_coverage": verified_cov,
         "history_threshold": settings.min_scan_bootstrap_coverage,
         "latest_threshold": settings.min_latest_bar_coverage,
+        "verified_threshold": settings.min_latest_verified_coverage,
     }
     return payload
 
@@ -425,6 +499,7 @@ def data_page(request: Request, db=Depends(db_session)):
         "bootstrap_busy": bootstrap_busy,
         "stock_timeout": settings.bootstrap_stock_timeout_seconds,
         "gap_batch_size": settings.gap_repair_batch_size,
+        "audit_batch_size": settings.latest_audit_batch_size,
     })
 
 
@@ -471,6 +546,30 @@ def admin_repair_latest_errors(background_tasks: BackgroundTasks, limit: int = F
     limit = max(1, min(int(limit), 200))
     if not _data_job_busy(db):
         background_tasks.add_task(_bg_gap_repair, limit, True)
+    return RedirectResponse("/data", 303)
+
+
+@app.post("/admin/audit-latest")
+def admin_audit_latest(
+    background_tasks: BackgroundTasks,
+    limit: int = Form(200),
+    db=Depends(db_session),
+):
+    limit = max(1, min(int(limit), 500))
+    if not _data_job_busy(db):
+        background_tasks.add_task(_bg_latest_audit, limit, False)
+    return RedirectResponse("/data", 303)
+
+
+@app.post("/admin/audit-latest-errors")
+def admin_audit_latest_errors(
+    background_tasks: BackgroundTasks,
+    limit: int = Form(100),
+    db=Depends(db_session),
+):
+    limit = max(1, min(int(limit), 200))
+    if not _data_job_busy(db):
+        background_tasks.add_task(_bg_latest_audit, limit, True)
     return RedirectResponse("/data", 303)
 
 

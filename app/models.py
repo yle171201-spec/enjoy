@@ -94,3 +94,20 @@ class BootstrapStock(Base):
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class LatestDayAudit(Base):
+    # Per-stock verification for a specific latest trading day.
+    # status: repaired / suspended / unknown / invalid / error
+    __tablename__ = "latest_day_audits"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code: Mapped[str] = mapped_column(String(6), index=True)
+    target_date: Mapped[date] = mapped_column(Date, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="unknown", index=True)
+    source: Mapped[str] = mapped_column(String(24), default="")
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("code", "target_date", name="uq_latest_day_audit"),
+        Index("ix_latest_day_audit_target_status", "target_date", "status"),
+    )
