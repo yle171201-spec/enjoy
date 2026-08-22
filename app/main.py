@@ -12,11 +12,15 @@ from sqlalchemy import select, func, distinct, text
 
 from .config import settings
 from .db import init_db, db_session, SessionLocal
-from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock, LatestDayAudit
+from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock, LatestDayAudit, LiveScanRun
 from .auth import valid_password, make_cookie, is_logged_in, COOKIE
 from .services.repository import latest_trade_date, latest_prices
 from .services.strategy_service import (
     run_full_scan, scan_progress_payload, recover_interrupted_scans,
+)
+from .services.live_scan import (
+    run_live_scan, live_progress_payload, live_state_status,
+    recover_interrupted_live_scans,
 )
 from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.chart_service import build_stock_chart
@@ -76,7 +80,7 @@ def _bg_smart_update():
 
         update = sync_daily_public(db)
         if update.get("status") == "ok":
-            run_full_scan(db)
+            run_live_scan(db)
             return
 
         stats = data_stats(db)
@@ -109,6 +113,20 @@ def _scan_job_busy(db) -> bool:
     ).scalar_one() or 0)
 
 
+def _live_scan_busy(db) -> bool:
+    return bool(db.execute(
+        select(func.count(LiveScanRun.id)).where(LiveScanRun.status == "running")
+    ).scalar_one() or 0)
+
+
+def _bg_live_scan(force: bool = False):
+    db = SessionLocal()
+    try:
+        run_live_scan(db, force=force)
+    finally:
+        db.close()
+
+
 def _bg_full_scan():
     db = SessionLocal()
     try:
@@ -122,7 +140,7 @@ def _bg_daily_and_scan():
     try:
         update = sync_daily_public(db)
         if update.get("status") == "ok":
-            run_full_scan(db)  # integrity gate inside run_full_scan blocks partial-universe scans
+            run_live_scan(db)  # daily path: latest-only; full scan is validation-only
     finally:
         db.close()
 
@@ -313,6 +331,7 @@ def startup():
     try:
         recover_interrupted_runs(db)
         recover_interrupted_scans(db)
+        recover_interrupted_live_scans(db)
     finally:
         db.close()
 
@@ -327,7 +346,7 @@ async def auth_middleware(request, call_next):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "version": settings.web_version, "strategy": settings.strategy_version}
+    return {"ok": True, "version": settings.web_version, "strategy": settings.strategy_version, "live_strategy": settings.live_strategy_version}
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -355,22 +374,42 @@ def logout():
 def dashboard(request: Request, db=Depends(db_session)):
     latest = latest_trade_date(db)
     scan = db.execute(select(ScanRun).order_by(ScanRun.id.desc()).limit(1)).scalar_one_or_none()
+    live_run = db.execute(select(LiveScanRun).order_by(LiveScanRun.id.desc()).limit(1)).scalar_one_or_none()
     update = db.execute(select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)).scalar_one_or_none()
+
+    live_current = bool(latest and live_run and live_run.status == "ok" and live_run.data_date == latest)
     sigs = []
-    if latest:
+    if latest and live_current:
         sigs = db.execute(
             select(Signal, Stock)
             .join(Stock, Stock.code == Signal.code, isouter=True)
-            .where(Signal.signal_date == latest)
+            .where(
+                Signal.strategy_version == settings.live_strategy_version,
+                Signal.signal_date == latest,
+            )
             .order_by(Signal.engine, Signal.target_weight.desc())
         ).all()
-    counts = {e: sum(1 for s, _ in sigs if s.engine == e) for e in "ABC"}
-    golden_pass = bool(scan and scan.golden_missing == 0 and scan.golden_extra == 0 and scan.combined_count == 198)
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request, "latest": latest, "scan": scan, "signals": sigs,
-        "signal_date": latest, "counts": counts, "golden_pass": golden_pass, "update": update,
-    })
 
+    counts = {e: sum(1 for s, _ in sigs if s.engine == e) for e in "ABC"}
+    if scan is None:
+        golden_status = "未扫描"
+    elif scan.golden_matched is None:
+        golden_status = "未校验（历史不足）"
+    elif scan.golden_missing == 0 and scan.golden_extra == 0:
+        golden_status = "PASS"
+    else:
+        golden_status = "FAIL"
+
+    state = live_state_status(db, latest)
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request, "latest": latest, "scan": scan,
+        "live_run": live_run, "live_progress": live_progress_payload(live_run),
+        "live_current": live_current, "live_busy": _live_scan_busy(db),
+        "scan_busy": _scan_job_busy(db), "data_busy": _data_job_busy(db),
+        "signals": sigs, "signal_date": latest, "counts": counts,
+        "golden_status": golden_status, "update": update, "state": state,
+        "web_version": settings.web_version,
+    })
 
 @app.get("/screener", response_class=HTMLResponse)
 def screener(
@@ -387,7 +426,10 @@ def screener(
     q = (
         select(Signal, Stock)
         .join(Stock, Stock.code == Signal.code, isouter=True)
-        .where(Signal.signal_date >= cutoff)
+        .where(
+            Signal.strategy_version == settings.live_strategy_version,
+            Signal.signal_date >= cutoff,
+        )
     )
     if engine != "ALL":
         q = q.where(Signal.engine.in_(tuple(engine.replace("+", ""))))
@@ -567,7 +609,7 @@ def admin_smart_update(
     background_tasks: BackgroundTasks,
     db=Depends(db_session),
 ):
-    if not _data_job_busy(db):
+    if not _data_job_busy(db) and not _scan_job_busy(db) and not _live_scan_busy(db):
         background_tasks.add_task(_bg_smart_update)
     return RedirectResponse("/data", 303)
 
@@ -643,10 +685,32 @@ def admin_audit_latest_errors(
 
 
 @app.post("/admin/daily-update")
-def admin_daily_update(background_tasks: BackgroundTasks):
-    background_tasks.add_task(_bg_daily_and_scan)
+def admin_daily_update(background_tasks: BackgroundTasks, db=Depends(db_session)):
+    if not _data_job_busy(db) and not _scan_job_busy(db) and not _live_scan_busy(db):
+        background_tasks.add_task(_bg_daily_and_scan)
     return RedirectResponse("/data", 303)
 
+
+@app.get("/api/live-scan/progress")
+def live_scan_progress(db=Depends(db_session)):
+    run = db.execute(
+        select(LiveScanRun).order_by(LiveScanRun.id.desc()).limit(1)
+    ).scalar_one_or_none()
+    p = live_progress_payload(run)
+    p["live_busy"] = _live_scan_busy(db)
+    p["scan_busy"] = _scan_job_busy(db)
+    p["data_busy"] = _data_job_busy(db)
+    return p
+
+
+@app.post("/admin/live-scan")
+def admin_live_scan(
+    background_tasks: BackgroundTasks,
+    db=Depends(db_session),
+):
+    if not _live_scan_busy(db) and not _scan_job_busy(db) and not _data_job_busy(db):
+        background_tasks.add_task(_bg_live_scan, True)
+    return RedirectResponse("/", 303)
 
 @app.get("/api/scan/progress")
 def scan_progress(db=Depends(db_session)):
@@ -679,7 +743,7 @@ def admin_scan(
     background_tasks: BackgroundTasks,
     db=Depends(db_session),
 ):
-    if _scan_job_busy(db) or _data_job_busy(db):
+    if _scan_job_busy(db) or _live_scan_busy(db) or _data_job_busy(db):
         return RedirectResponse("/validation", 303)
     ready = scan_readiness(db, check_calendar=True)
     if not ready["scan_ready"]:

@@ -6,6 +6,7 @@ import json
 import pandas as pd
 
 from ..engine.strategy_reference_v18 import run_close_reference, compare_to_golden
+from .live_scan import persist_full_seed, run_live_scan
 from ..models import ScanRun, DailyBar
 from .repository import (
     load_all_frames, load_all_frames_batched, replace_signals, latest_trade_date,
@@ -197,21 +198,46 @@ def run_full_scan(db, force: bool = False):
             mem = f"；峰值RSS {rss:.0f} MB" if rss is not None else ""
             _set_progress(db, run, overall, stage, detail + mem)
 
+        state_capture = {"market": None, "a60": []}
+        def state_cb(kind, payload):
+            if kind == "MARKET":
+                state_capture["market"] = payload
+            elif kind == "A60" and payload is not None and len(payload):
+                state_capture["a60"].append(payload.copy())
+
         sig, diag = run_close_reference(
             frames,
             run_exits=True,
             progress_cb=engine_progress,
             memory_safe=True,
+            state_cb=state_cb,
         )
 
         _set_progress(db, run, 90, "整理信号", f"V18 返回 {len(sig)} 条历史事件")
         sig = _attach_exit_dates(sig, frames)
+
+        _set_progress(db, run, 92, "初始化 V18 Live 状态", "只保存 market/A60 peer；先释放全市场K线再跑 Latest-only")
+        peer_pool = pd.concat(state_capture["a60"], ignore_index=True) if state_capture["a60"] else pd.DataFrame()
+        persist_full_seed(
+            db,
+            state_capture["market"],
+            peer_pool,
+            expected_peer_n=int(diag.get("peer_pool", 0)),
+        )
+
         frames.clear()
         import gc
         gc.collect()
 
-        _set_progress(db, run, 94, "写入信号", "已释放全市场K线内存；替换数据库中的 V18 信号结果")
+        _set_progress(db, run, 94, "写入信号", "已释放全市场K线内存；替换数据库中的历史 V18 信号结果")
         replace_signals(db, sig, "V18")
+
+        _set_progress(db, run, 96, "生成 V18 Live", "全市场历史K线已释放；现在用流式 Latest-only 生成明日候选")
+        try:
+            run_live_scan(db, force=True)
+        except Exception as live_error:
+            # Historical V18 remains valid; LiveScanRun keeps its own error.
+            _set_progress(db, run, 96.5, "V18 Live 需要复查", str(live_error))
 
         _set_progress(db, run, 97, "结果校验", "统计 A/B/C；检查是否具备 Golden 历史窗口")
         earliest_db = db.execute(select(func.min(DailyBar.trade_date))).scalar_one_or_none()

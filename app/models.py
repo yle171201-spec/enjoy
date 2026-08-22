@@ -111,3 +111,46 @@ class LatestDayAudit(Base):
         UniqueConstraint("code", "target_date", name="uq_latest_day_audit"),
         Index("ix_latest_day_audit_target_status", "target_date", "status"),
     )
+
+class LiveMarketState(Base):
+    __tablename__ = "live_market_states"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy_version: Mapped[str] = mapped_column(String(32), default="V18")
+    trade_date: Mapped[date] = mapped_column(Date, index=True)
+    q40: Mapped[float | None] = mapped_column(Float, nullable=True)
+    above20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mom20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("strategy_version", "trade_date", name="uq_live_market_state"),
+        Index("ix_live_market_version_date", "strategy_version", "trade_date"),
+    )
+
+
+class LivePeerEvent(Base):
+    __tablename__ = "live_peer_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy_version: Mapped[str] = mapped_column(String(32), default="V18")
+    code: Mapped[str] = mapped_column(String(6), index=True)
+    event_date: Mapped[date] = mapped_column(Date, index=True)
+    buy: Mapped[float] = mapped_column(Float)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("strategy_version", "code", "event_date", name="uq_live_peer_event"),
+        Index("ix_live_peer_version_date", "strategy_version", "event_date"),
+    )
+
+
+class LiveScanRun(Base):
+    __tablename__ = "live_scan_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    data_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="running")
+    a_count: Mapped[int] = mapped_column(Integer, default=0)
+    b_count: Mapped[int] = mapped_column(Integer, default=0)
+    c_count: Mapped[int] = mapped_column(Integer, default=0)
+    combined_count: Mapped[int] = mapped_column(Integer, default=0)
+    candidate_count: Mapped[int] = mapped_column(Integer, default=0)
+    message: Mapped[str] = mapped_column(Text, default="")

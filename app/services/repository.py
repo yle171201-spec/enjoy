@@ -185,6 +185,64 @@ def load_all_frames_batched(
 
 
 
+
+def iter_frame_batches(
+    db,
+    start_date=None,
+    end_date=None,
+    batch_size: int = 160,
+    codes=None,
+    nonst_only: bool = True,
+):
+    """Yield (done, total, frames) without retaining the whole market in RAM."""
+    if codes is None:
+        q = select(Stock.code)
+        if nonst_only:
+            q = q.where(Stock.is_st.is_(False))
+        codes = [str(x).zfill(6) for x in db.execute(q.order_by(Stock.code)).scalars().all()]
+    else:
+        codes = sorted({str(x).zfill(6) for x in codes})
+
+    total = len(codes)
+    if not total:
+        return
+
+    batch_size = max(20, int(batch_size))
+    cols = [
+        DailyBar.code, DailyBar.trade_date, DailyBar.open, DailyBar.high,
+        DailyBar.low, DailyBar.close, DailyBar.volume, DailyBar.amount,
+        DailyBar.turnover,
+    ]
+    for start in range(0, total, batch_size):
+        batch = codes[start:start + batch_size]
+        stmt = select(*cols).where(DailyBar.code.in_(batch))
+        if start_date is not None:
+            stmt = stmt.where(DailyBar.trade_date >= start_date)
+        if end_date is not None:
+            stmt = stmt.where(DailyBar.trade_date <= end_date)
+        stmt = stmt.order_by(DailyBar.code, DailyBar.trade_date)
+        x = pd.read_sql(stmt, db.bind)
+        frames = _df_to_frames(x)
+        done = min(total, start + len(batch))
+        yield done, total, frames
+
+
+def close_asof_for_codes(db, codes, asof_date):
+    codes = sorted({str(c).zfill(6) for c in codes})
+    if not codes:
+        return {}
+    sub = (
+        select(DailyBar.code.label("code"), func.max(DailyBar.trade_date).label("mx"))
+        .where(DailyBar.code.in_(codes), DailyBar.trade_date <= asof_date)
+        .group_by(DailyBar.code)
+        .subquery()
+    )
+    rows = db.execute(
+        select(DailyBar.code, DailyBar.close)
+        .join(sub, (DailyBar.code == sub.c.code) & (DailyBar.trade_date == sub.c.mx))
+    ).all()
+    return {str(code).zfill(6): float(close) for code, close in rows}
+
 def load_frames_for_codes(db, codes, start_date=None):
     codes = sorted({str(c).zfill(6) for c in codes})
     if not codes:
@@ -266,3 +324,58 @@ def replace_signals(db, frame, version="V18"):
             metadata_json=json.dumps(meta, ensure_ascii=False, default=str),
         ))
     db.commit()
+
+def replace_signals_for_date(db, frame, signal_date, version="V18-LIVE"):
+    """Replace only one strategy/date slice; historical V18 rows are untouched."""
+    db.execute(delete(Signal).where(
+        Signal.strategy_version == version,
+        Signal.signal_date == signal_date,
+    ))
+    db.commit()
+    if frame is None or frame.empty:
+        return 0
+
+    count = 0
+    for r in frame.itertuples(index=False):
+        raw = r._asdict()
+        core = {
+            "code", "date", "engine", "buy", "fail_price", "risk_pct", "target_weight",
+            "exit_ret", "exit_reason", "exit_idx", "exit_date"
+        }
+        meta = {k: v for k, v in raw.items() if k not in core}
+
+        def clean(v):
+            if isinstance(v, pd.Timestamp):
+                return v.strftime("%Y-%m-%d")
+            if isinstance(v, date):
+                return v.isoformat()
+            if isinstance(v, np.integer):
+                return int(v)
+            if isinstance(v, np.floating):
+                return None if not np.isfinite(v) else float(v)
+            if isinstance(v, np.ndarray):
+                return v.tolist()
+            return v
+
+        meta = {k: clean(v) for k, v in meta.items()}
+        h = getattr(r, "Hdaily", None)
+        p_level = getattr(r, "P", None)
+        db.add(Signal(
+            strategy_version=version,
+            code=str(r.code).zfill(6),
+            signal_date=pd.Timestamp(r.date).date(),
+            engine=str(r.engine),
+            signal_close=float(r.buy),
+            fail_price=float(r.fail_price),
+            risk_pct=float(r.risk_pct),
+            target_weight=float(r.target_weight),
+            h_daily=float(h) if h is not None and pd.notna(h) else None,
+            p_level=float(p_level) if p_level is not None and pd.notna(p_level) else None,
+            exit_date=None,
+            exit_ret=None,
+            exit_reason=None,
+            metadata_json=json.dumps(meta, ensure_ascii=False, default=str),
+        ))
+        count += 1
+    db.commit()
+    return count

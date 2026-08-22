@@ -37,7 +37,10 @@ def perf(values) -> dict:
 
 
 def _signals_query(db, engines=("A", "B", "C"), start: date | None = None, end: date | None = None):
-    q = select(Signal).where(Signal.engine.in_(tuple(engines))).order_by(Signal.signal_date, Signal.engine)
+    q = select(Signal).where(
+        Signal.strategy_version == "V18",
+        Signal.engine.in_(tuple(engines)),
+    ).order_by(Signal.signal_date, Signal.engine)
     if start:
         q = q.where(Signal.signal_date >= start)
     if end:

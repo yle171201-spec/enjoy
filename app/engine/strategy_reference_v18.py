@@ -545,7 +545,8 @@ def build_a_peer_state(
 def scan_a_final(
     stocks: Dict[str,pd.DataFrame],
     market: MarketContext,
-    p: P=PARAM
+    p: P=PARAM,
+    state_cb=None,
 ) -> Tuple[pd.DataFrame,pd.DataFrame]:
     """
     Returns:
@@ -559,6 +560,11 @@ def scan_a_final(
         for W in p.pressure_windows:
             z=scan_a_window(df,code,W,market,p)
             if len(z):
+                if state_cb is not None and W == 60:
+                    try:
+                        state_cb("A60", z.copy())
+                    except Exception:
+                        pass
                 raw.append(z)
 
     if not raw:
@@ -1134,6 +1140,7 @@ def run_close_reference(
     run_exits: bool=True,
     progress_cb=None,
     memory_safe: bool=False,
+    state_cb=None,
 ) -> Tuple[pd.DataFrame,dict]:
     """
     End-to-end reference entry engine.
@@ -1194,9 +1201,14 @@ def run_close_reference(
         market=build_market_context(stocks)
 
     emit("构建市场横截面", 0.23, "q40 / above20 / mom20 已完成")
+    if state_cb is not None:
+        try:
+            state_cb("MARKET", market)
+        except Exception:
+            pass
 
     emit("Engine A", 0.24, "正在扫描 A 结构")
-    a,peer_pool=scan_a_final(stocks,market,p)
+    a,peer_pool=scan_a_final(stocks,market,p,state_cb=state_cb)
     emit("Engine A", 0.48, f"A 完成：{len(a)} 条；peer pool {len(peer_pool)}")
 
     emit("Engine B", 0.50, "正在扫描 B 结构")

@@ -3,24 +3,55 @@
 {% block content %}
 <section class="hero">
   <div>
-    <span class="eyebrow">POST-CLOSE SCAN</span>
+    <span class="eyebrow">LATEST-ONLY LIVE SCAN</span>
     <h1>明日候选</h1>
-    <p>只展示数据库最新完成交易日产生的正式 A/B/C 信号。第二天输入真实开盘/成交价后重新计算最终仓位。</p>
+    <p>只展示最新完成交易日的 V18 Live 正式 A/B/C 信号。日常扫描与完整历史复现已分离；完整扫描只用于回归与 Golden 校验。</p>
   </div>
   <div class="status">
     <div>最新日线 <b>{{ latest or '暂无' }}</b></div>
-    <div>策略 <b>V18 / Web V2</b></div>
-    <div>Golden <b class="{{'ok' if golden_pass else 'warn-text'}}">{{'PASS' if golden_pass else '未通过/未扫描'}}</b></div>{% if update %}<div>数据更新 <b>{{update.status}} {{update.success_count}}/{{update.stock_count}}</b></div>{% endif %}
+    <div>策略 <b>V18 Live / {{ web_version }}</b></div>
+    <div>日常状态 <b class="{{ 'ok' if live_current else 'warn-text' }}">{{ 'READY' if live_current else '待扫描/待初始化' }}</b></div>
+    <div>Golden <b class="{{ 'ok' if golden_status == 'PASS' else 'warn-text' }}">{{ golden_status }}</b></div>
+    {% if update %}<div>数据更新 <b>{{update.status}} {{update.success_count}}/{{update.stock_count}}</b></div>{% endif %}
   </div>
 </section>
 
+{% if live_run and live_run.status == 'running' %}
+<section class="panel">
+  <div class="section-head">
+    <div><span class="eyebrow">LIVE PROGRESS</span><h2 id="live-stage">{{ live_progress.stage }}</h2></div>
+    <b id="live-percent" style="font-size:28px">{{ '%.0f%%'|format(live_progress.percent) }}</b>
+  </div>
+  <div style="height:14px;background:rgba(255,255,255,.08);border-radius:999px;overflow:hidden">
+    <div id="live-bar" style="height:100%;width:{{ live_progress.percent }}%;background:linear-gradient(90deg,#2a6fa6,#4ce0a1);transition:width .3s"></div>
+  </div>
+  <p id="live-detail" class="muted">{{ live_progress.detail }}</p>
+</section>
+{% endif %}
+
+{% if not state.ready %}
+<section class="note">
+  <b class="warn-text">V2.3 日常状态尚未初始化。</b>
+  为保证 A 的 20 日 peer 与历史 q40/breadth 连续，请到“复现校验”再运行一次完整 V18 扫描。
+  这是升级后的最后一次初始化；以后每天不再需要完整扫描。
+</section>
+{% elif latest and not live_current %}
+<section class="note">
+  <b class="warn-text">{{ latest }} 数据已有，但 V18 Live 尚未完成该日扫描。</b>
+  这里不会把“尚未扫描”误显示成“0只信号”。
+  <form method="post" action="/admin/live-scan" style="margin-top:10px">
+    <button class="primary" type="submit" {% if scan_busy or data_busy or live_busy %}disabled{% endif %}>运行今日日常扫描</button>
+  </form>
+</section>
+{% endif %}
+
 <div class="cards">
-  <div class="card engine-a"><b>A 主仓</b><strong>{{ counts.A }}</strong><span>老压力突破回踩</span></div>
-  <div class="card engine-b"><b>B 主仓</b><strong>{{ counts.B }}</strong><span>强启动首回踩</span></div>
-  <div class="card engine-c"><b>C 卫星</b><strong>{{ counts.C }}</strong><span>高位横强再启动</span></div>
+  <div class="card engine-a"><b>A 主仓</b><strong>{{ counts.A if live_current else '-' }}</strong><span>老压力突破回踩</span></div>
+  <div class="card engine-b"><b>B 主仓</b><strong>{{ counts.B if live_current else '-' }}</strong><span>强启动首回踩</span></div>
+  <div class="card engine-c"><b>C 卫星</b><strong>{{ counts.C if live_current else '-' }}</strong><span>高位横强再启动</span></div>
 </div>
 
-{% if signals %}
+{% if live_current and signals %}
 <section>
   <div class="section-head"><div><span class="eyebrow">{{ signal_date }}</span><h2>明日执行清单</h2></div><a class="btn" href="/screener?n=5">看最近5日</a></div>
   <div class="signal-grid">
@@ -38,13 +69,42 @@
   {% endfor %}
   </div>
 </section>
-{% else %}
-<div class="empty"><b>{{latest or '当前'}}没有正式 A/B/C 新买点。</b><span>这是正常状态，不为了每天有票而放宽策略。可去 N日选股 查看近期信号。</span></div>
+{% elif live_current %}
+<div class="empty"><b>{{latest or '当前'}} V18 Live 没有正式 A/B/C 新买点。</b><span>这是扫描完成后的真实 0，不为了每天有票而放宽策略。</span></div>
+{% endif %}
+
+{% if live_run %}
+<section class="note"><b>最近日常扫描：</b>{{live_run.status}} ｜ {{live_run.data_date or '-'}} ｜ A {{live_run.a_count}} / B {{live_run.b_count}} / C {{live_run.c_count}} / 合计 {{live_run.combined_count}} ｜ 预筛 {{live_run.candidate_count}}</section>
 {% endif %}
 
 {% if scan %}
-<section class="note">
-  <b>最近完整扫描：</b>{{scan.status}} ｜ A {{scan.a_count}} / B {{scan.b_count}} / C {{scan.c_count}} / 合计 {{scan.combined_count}} ｜ Golden matched {{scan.golden_matched if scan.golden_matched is not none else '-'}} / missing {{scan.golden_missing if scan.golden_missing is not none else '-'}} / extra {{scan.golden_extra if scan.golden_extra is not none else '-'}}
-</section>
+<section class="note"><b>最近完整复现扫描：</b>{{scan.status}} ｜ A {{scan.a_count}} / B {{scan.b_count}} / C {{scan.c_count}} / 合计 {{scan.combined_count}} ｜ Golden matched {{scan.golden_matched if scan.golden_matched is not none else '-'}} / missing {{scan.golden_missing if scan.golden_missing is not none else '-'}} / extra {{scan.golden_extra if scan.golden_extra is not none else '-'}}</section>
+{% endif %}
+
+{% if live_run and live_run.status == 'running' %}
+<script>
+(() => {
+  let previous = 'running';
+  async function poll() {
+    try {
+      const r = await fetch('/api/live-scan/progress', {cache:'no-store',headers:{Accept:'application/json'}});
+      if (!r.ok) throw new Error();
+      const p = await r.json();
+      const pct = Number(p.percent || 0);
+      if (document.getElementById('live-stage')) document.getElementById('live-stage').textContent = p.stage || '-';
+      if (document.getElementById('live-percent')) document.getElementById('live-percent').textContent = `${pct.toFixed(0)}%`;
+      if (document.getElementById('live-bar')) document.getElementById('live-bar').style.width = `${pct}%`;
+      if (document.getElementById('live-detail')) document.getElementById('live-detail').textContent = p.detail || '';
+      if (previous === 'running' && ['ok','error','blocked','interrupted','skipped'].includes(p.status)) {
+        setTimeout(() => window.location.reload(), 700);
+        return;
+      }
+      previous = p.status;
+    } catch(e) {}
+    setTimeout(poll, 2000);
+  }
+  poll();
+})();
+</script>
 {% endif %}
 {% endblock %}

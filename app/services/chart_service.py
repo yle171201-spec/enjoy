@@ -48,6 +48,8 @@ def build_stock_chart(db, code: str, limit: int = 520) -> dict:
     signals = db.execute(
         select(Signal).where(Signal.code == code).order_by(Signal.signal_date)
     ).scalars().all()
+    live_keys = {(s.signal_date, s.engine) for s in signals if s.strategy_version == "V18-LIVE"}
+    signals = [s for s in signals if s.strategy_version == "V18-LIVE" or (s.signal_date, s.engine) not in live_keys]
 
     lines = []
     areas = []
