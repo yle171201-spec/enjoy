@@ -37,10 +37,10 @@ def _bg_bootstrap(limit: int, retry_errors: bool = False):
         db.close()
 
 
-def _bg_gap_repair(limit: int):
+def _bg_gap_repair(limit: int, retry_errors: bool = False):
     db = SessionLocal()
     try:
-        repair_latest_gaps(db, limit=limit)
+        repair_latest_gaps(db, limit=limit, retry_errors=retry_errors)
     finally:
         db.close()
 
@@ -135,47 +135,12 @@ def _db_storage_stats(db, stats: dict) -> dict:
     }
 
 
-def _live_data_progress(db, target: date | None = None) -> dict:
-    # Lightweight DB-only status for browser polling.
-    stocks = int(db.execute(select(func.count(Stock.code))).scalar_one() or 0)
-    bars = int(db.execute(select(func.count(DailyBar.id))).scalar_one() or 0)
-    strategy_pool = int(db.execute(
-        select(func.count(Stock.code)).where(Stock.is_st.is_(False))
-    ).scalar_one() or 0)
-    bootstrap_done = int(db.execute(
-        select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "ok")
-    ).scalar_one() or 0)
-    bootstrap_errors = int(db.execute(
-        select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "error")
-    ).scalar_one() or 0)
-    history_coverage = (
-        float(bootstrap_done) / float(strategy_pool) if strategy_pool else 0.0
-    )
-
-    latest = db.execute(select(func.max(DailyBar.trade_date))).scalar_one_or_none()
-    target_day = target or latest
-    latest_strategy_rows = 0
-    latest_coverage = 0.0
-    if target_day is not None and strategy_pool:
-        latest_strategy_rows = int(db.execute(
-            select(func.count(distinct(DailyBar.code)))
-            .join(Stock, Stock.code == DailyBar.code)
-            .where(
-                DailyBar.trade_date == target_day,
-                Stock.is_st.is_(False),
-            )
-        ).scalar_one() or 0)
-        latest_coverage = float(latest_strategy_rows) / float(strategy_pool)
-
-    update = db.execute(
-        select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)
-    ).scalar_one_or_none()
-
+def _live_data_progress(db, target: date | None = None, full: bool = False) -> dict:
+    update = db.execute(select(DataUpdateRun).order_by(DataUpdateRun.id.desc()).limit(1)).scalar_one_or_none()
     update_payload = None
     if update is not None:
         update_payload = {
-            "status": update.status,
-            "provider": update.provider,
+            "status": update.status, "provider": update.provider,
             "start_date": str(update.start_date) if update.start_date else None,
             "end_date": str(update.end_date) if update.end_date else None,
             "stock_count": int(update.stock_count or 0),
@@ -183,26 +148,30 @@ def _live_data_progress(db, target: date | None = None) -> dict:
             "failed_count": int(update.failed_count or 0),
             "message": update.message or "",
         }
+    payload = {"update": update_payload, "data_busy": _data_job_busy(db)}
+    if not full:
+        return payload
 
-    return {
-        "stats": {
-            "stocks": stocks,
-            "bars": bars,
-            "strategy_pool": strategy_pool,
-            "excluded_metadata": max(0, stocks - strategy_pool),
-            "bootstrap_done": bootstrap_done,
-            "bootstrap_errors": bootstrap_errors,
-            "bootstrap_coverage": history_coverage,
-            "latest": str(latest) if latest else None,
-            "latest_target": str(target_day) if target_day else None,
-            "latest_strategy_rows": latest_strategy_rows,
-            "latest_bar_coverage": latest_coverage,
-            "history_threshold": settings.min_scan_bootstrap_coverage,
-            "latest_threshold": settings.min_latest_bar_coverage,
-        },
-        "update": update_payload,
-        "data_busy": _data_job_busy(db),
+    stocks = int(db.execute(select(func.count(Stock.code))).scalar_one() or 0)
+    bars = int(db.execute(select(func.count(DailyBar.id))).scalar_one() or 0)
+    pool = int(db.execute(select(func.count(Stock.code)).where(Stock.is_st.is_(False))).scalar_one() or 0)
+    done = int(db.execute(select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "ok")).scalar_one() or 0)
+    errs = int(db.execute(select(func.count(BootstrapStock.code)).where(BootstrapStock.status == "error")).scalar_one() or 0)
+    latest = db.execute(select(func.max(DailyBar.trade_date))).scalar_one_or_none()
+    target_day = target or latest
+    latest_rows = 0
+    if target_day and pool:
+        latest_rows = int(db.execute(select(func.count(distinct(DailyBar.code))).join(Stock, Stock.code == DailyBar.code).where(DailyBar.trade_date == target_day, Stock.is_st.is_(False))).scalar_one() or 0)
+    payload["stats"] = {
+        "stocks": stocks, "bars": bars, "strategy_pool": pool,
+        "bootstrap_done": done, "bootstrap_errors": errs,
+        "bootstrap_coverage": (done/pool if pool else 0.0),
+        "latest_strategy_rows": latest_rows,
+        "latest_bar_coverage": (latest_rows/pool if pool else 0.0),
+        "history_threshold": settings.min_scan_bootstrap_coverage,
+        "latest_threshold": settings.min_latest_bar_coverage,
     }
+    return payload
 
 
 @app.on_event("startup")
@@ -434,9 +403,10 @@ def portfolio_run(
 @app.get("/api/data/progress")
 def data_progress(
     target: date | None = Query(None),
+    full: bool = Query(False),
     db=Depends(db_session),
 ):
-    return _live_data_progress(db, target=target)
+    return _live_data_progress(db, target=target, full=full)
 
 
 @app.get("/data", response_class=HTMLResponse)
@@ -492,7 +462,15 @@ def admin_repair_latest(
 ):
     limit = max(1, min(int(limit), 500))
     if not _data_job_busy(db):
-        background_tasks.add_task(_bg_gap_repair, limit)
+        background_tasks.add_task(_bg_gap_repair, limit, False)
+    return RedirectResponse("/data", 303)
+
+
+@app.post("/admin/repair-latest-errors")
+def admin_repair_latest_errors(background_tasks: BackgroundTasks, limit: int = Form(100), db=Depends(db_session)):
+    limit = max(1, min(int(limit), 200))
+    if not _data_job_busy(db):
+        background_tasks.add_task(_bg_gap_repair, limit, True)
     return RedirectResponse("/data", 303)
 
 

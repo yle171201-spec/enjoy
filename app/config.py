@@ -22,6 +22,7 @@ class Settings:
     bootstrap_batch_size: int = int(_env("BOOTSTRAP_BATCH_SIZE", "100"))
     bootstrap_stock_timeout_seconds: int = int(_env("BOOTSTRAP_STOCK_TIMEOUT_SECONDS", "60"))
     gap_repair_batch_size: int = int(_env("GAP_REPAIR_BATCH_SIZE", "500"))
+    gap_repair_workers: int = int(_env("GAP_REPAIR_WORKERS", "6"))
     live_scan_calendar_days: int = int(_env("LIVE_SCAN_CALENDAR_DAYS", "720"))
     min_scan_bootstrap_coverage: float = float(_env("MIN_SCAN_BOOTSTRAP_COVERAGE", "0.95"))
     min_latest_bar_coverage: float = float(_env("MIN_LATEST_BAR_COVERAGE", "0.95"))
@@ -30,7 +31,7 @@ class Settings:
     calendar_gap_check_days: int = int(_env("CALENDAR_GAP_CHECK_DAYS", "420"))
     default_n_days: int = int(_env("DEFAULT_N_DAYS", "20"))
     slippage_bps: float = float(_env("SLIPPAGE_BPS", "0"))
-    web_version: str = "V2.1.5"
+    web_version: str = "V2.1.6"
     strategy_version: str = "V18"
     cookie_secure: bool = _env("COOKIE_SECURE", "0").lower() in {"1","true","yes","on"}
 

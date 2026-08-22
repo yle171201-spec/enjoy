@@ -4,7 +4,7 @@ from datetime import date, timedelta, datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing as mp
 import pandas as pd
-from sqlalchemy import select, func, distinct
+from sqlalchemy import select, func, distinct, or_
 
 from ..config import settings
 from ..models import DataUpdateRun, Stock, DailyBar, BootstrapStock
@@ -401,125 +401,88 @@ def bootstrap_batch(db, start=None, end=None, limit=None, retry_errors: bool = F
         raise
 
 
-def repair_latest_gaps(db, limit=None):
-    # Repair per-stock history gaps up to the latest completed trading day.
-    # Zero rows are treated as a no-trade result (often suspension), not bootstrap failure.
-    active = db.execute(
-        select(func.count(DataUpdateRun.id)).where(DataUpdateRun.status == "running")
-    ).scalar_one()
+def repair_latest_gaps(db, limit=None, retry_errors: bool = False):
+    """Fast resumable latest-day repair without re-processing no-trade stocks.
+
+    V2.1.5 selected rows only by last_date < target. Suspended stocks returned 0
+    rows, so their last_date never advanced and they reoccupied the next batch.
+    V2.1.6 records a target-date marker in BootstrapStock.message so every code is
+    attempted once per target date; errors are quarantined for explicit retry.
+    """
+    active = db.execute(select(func.count(DataUpdateRun.id)).where(DataUpdateRun.status == "running")).scalar_one()
     if active:
         return []
 
     provider = get_provider()
     target = provider.latest_completed_trade_date()
     limit = int(limit or settings.gap_repair_batch_size)
-    timeout_seconds = max(10, int(settings.bootstrap_stock_timeout_seconds))
-    run = _new_run(
-        db,
-        f"{getattr(provider, 'name', 'provider')}-gap-repair",
-        None,
-        target,
-    )
+    workers = max(1, min(int(settings.gap_repair_workers), 8))
+    ok_prefix = f"gap_checked:{target}:"
+    err_prefix = f"gap_checked:{target}:error:"
+    pname = f"{getattr(provider, 'name', 'provider')}-gap-repair" + ("-retry" if retry_errors else "")
+    run = _new_run(db, pname, None, target)
 
     latest_by_code = (
-        select(
-            DailyBar.code.label("code"),
-            func.max(DailyBar.trade_date).label("last_date"),
-        )
-        .group_by(DailyBar.code)
-        .subquery()
+        select(DailyBar.code.label("code"), func.max(DailyBar.trade_date).label("last_date"))
+        .group_by(DailyBar.code).subquery()
     )
-
     try:
-        rows = db.execute(
+        q = (
             select(Stock.code, latest_by_code.c.last_date)
+            .join(BootstrapStock, BootstrapStock.code == Stock.code)
             .outerjoin(latest_by_code, latest_by_code.c.code == Stock.code)
-            .where(
-                Stock.is_st.is_(False),
-                (
-                    latest_by_code.c.last_date.is_(None)
-                    | (latest_by_code.c.last_date < target)
-                ),
+            .where(Stock.is_st.is_(False))
+        )
+        if retry_errors:
+            q = q.where(BootstrapStock.message.like(err_prefix + "%"))
+        else:
+            q = q.where(
+                (latest_by_code.c.last_date.is_(None) | (latest_by_code.c.last_date < target)),
+                or_(BootstrapStock.message == "", ~BootstrapStock.message.like(ok_prefix + "%")),
             )
-            .order_by(Stock.code)
-            .limit(limit)
-        ).all()
-
-        run.stock_count = len(rows)
-        run.success_count = 0
-        run.failed_count = 0
+        rows = db.execute(q.order_by(Stock.code).limit(limit)).all()
+        run.stock_count = len(rows); run.success_count = 0; run.failed_count = 0
+        run.message = f"极速缺口修复准备：{len(rows)}只；目标{target}；并发{workers}"
         db.commit()
-
         if not rows:
-            run.status = "complete"
-            run.message = f"{target} 前不存在需要修复的策略股历史缺口"
-            run.finished_at = datetime.utcnow()
-            db.commit()
-            return []
+            run.status = "complete"; run.message = "当前没有新的待修复股票" if not retry_errors else "当前没有待重试的修复错误"
+            run.finished_at = datetime.utcnow(); db.commit(); return []
 
-        results = []
-        errors = []
-        no_trade = 0
-        inserted_rows = 0
-        total = len(rows)
-
-        for idx, (code, last_date) in enumerate(rows, start=1):
+        def one(code, last_date):
             code = str(code).zfill(6)
-            start = (
-                last_date + timedelta(days=1)
-                if last_date is not None
-                else date.fromisoformat(settings.bootstrap_start_date)
-            )
+            start = last_date + timedelta(days=1) if last_date else date.fromisoformat(settings.bootstrap_start_date)
+            frame = provider.repair_history(code, start, target) if hasattr(provider, "repair_history") else provider.history(code, start, target)
+            return code, start, frame
 
-            run.message = (
-                f"最新日线修复 {idx - 1}/{total}；当前 {code}；"
-                f"{start} → {target}；单股硬超时 {timeout_seconds}s"
-            )
-            db.commit()
-
-            try:
-                frame = _history_with_timeout(code, start, target, timeout_seconds)
-                n = upsert_bars(db, code, frame)
-                run.success_count += 1
-                inserted_rows += int(n or 0)
-                if n <= 0:
-                    no_trade += 1
-                    result_note = "无可补日线（可能停牌/区间内无交易）"
-                else:
-                    result_note = f"补入 {n} 行"
-                results.append((code, int(n or 0)))
-                run.message = (
-                    f"最新日线修复 {idx}/{total}；刚处理 {code}：{result_note}；"
-                    f"成功 {run.success_count}；失败 {run.failed_count}"
-                )
-            except Exception as e:
-                msg = f"{type(e).__name__}: {e}"[:1000]
-                errors.append(f"{code}: {msg}")
-                run.failed_count += 1
-                run.message = (
-                    f"最新日线修复 {idx}/{total}；{code} 失败；"
-                    f"成功 {run.success_count}；失败 {run.failed_count}；{msg[:240]}"
-                )
-            db.commit()
+        total = len(rows); done = 0; inserted = 0; no_trade = 0; errors = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(one, code, last_date): str(code).zfill(6) for code,last_date in rows}
+            for fut in as_completed(futs):
+                code = futs[fut]
+                state = db.get(BootstrapStock, code)
+                try:
+                    _, start, frame = fut.result()
+                    n = upsert_bars(db, code, frame)
+                    inserted += int(n or 0); run.success_count += 1
+                    if n > 0:
+                        state.message = ""
+                    else:
+                        no_trade += 1
+                        state.message = f"{ok_prefix}no_trade"
+                except Exception as e:
+                    msg = f"{type(e).__name__}: {e}"[:700]
+                    run.failed_count += 1; errors.append(f"{code}: {msg}")
+                    state.message = err_prefix + msg
+                state.updated_at = datetime.utcnow(); done += 1
+                run.message = f"极速缺口修复 {done}/{total}；刚处理 {code}；成功 {run.success_count}；失败 {run.failed_count}；补入 {inserted} 行；无交易 {no_trade}"
+                db.commit()
 
         run.status = "ok" if not errors else "partial"
-        summary = (
-            f"修复批次完成：处理 {total} 只，成功 {run.success_count}，"
-            f"失败 {run.failed_count}；共补入 {inserted_rows} 行；"
-            f"无交易/可能停牌 {no_trade} 只。"
-        )
-        if errors:
-            summary += "\n" + "\n".join(errors[:50])
-        run.message = summary
-        run.finished_at = datetime.utcnow()
-        db.commit()
-        return results
+        run.message = f"极速修复完成：处理{total}只；成功{run.success_count}；失败{run.failed_count}；补入{inserted}行；无交易/停牌{no_trade}。"
+        if errors: run.message += "\n错误已隔离，可单独重试：\n" + "\n".join(errors[:30])
+        run.finished_at = datetime.utcnow(); db.commit(); return []
     except Exception as e:
-        run.status = "error"
-        run.message = f"{type(e).__name__}: {e}"
-        run.finished_at = datetime.utcnow()
-        db.commit()
-        raise
+        run.status = "error"; run.message = f"{type(e).__name__}: {e}"; run.finished_at = datetime.utcnow(); db.commit(); raise
 
 
 def sync_daily_public(db, now: datetime | None = None):

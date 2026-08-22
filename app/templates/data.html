@@ -5,7 +5,7 @@
   <div>
     <span class="eyebrow">PUBLIC DATA PIPELINE</span>
     <h1>数据管理</h1>
-    <p>无需 Tushare Token。V2.1.5 将“历史池完整度”和“最新交易日覆盖”分开核验，并提供历史缺口修复；正式 ABC 扫描只有两道覆盖门和交易日历均通过才会 READY。</p>
+    <p>无需 Tushare Token。V2.1.6 修复停牌/无交易股票反复进入缺口队列的问题，并启用短缺口并发抓取；3秒轮询只读任务状态，不再反复扫描百万行日线。</p>
   </div>
   <div class="status">
     <div>数据源 <b>{{ provider }}</b></div>
@@ -59,7 +59,8 @@
     <label>本批修复股票数<input id="repair-limit" name="limit" type="number" value="{{ gap_batch_size }}" min="1" max="500" {% if bootstrap_busy %}disabled{% endif %}></label>
     <button id="repair-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else '修复最新日线缺口' }}</button>
   </form>
-  <p class="muted">周末/节假日也可以执行这个修复：它走历史日线接口，不会把实时快照错误标记成历史日期。建议每次 500 只，直到最新覆盖率达到门槛。</p>
+  <p class="muted">V2.1.6 使用 {{ settings_gap_workers|default(6) }} 路短缺口并发；已确认无交易/停牌的股票会按目标日记账，不会下一批再次占坑。修复错误可用下方按钮单独重试。</p>
+  <form method="post" action="/admin/repair-latest-errors" class="toolbar compact-toolbar" style="margin-top:12px"><label>错误重试数<input name="limit" type="number" value="100" min="1" max="200" {% if bootstrap_busy %}disabled{% endif %}></label><button type="submit" {% if bootstrap_busy %}disabled{% endif %}>重试修复错误</button></form>
 </section>
 
 <section class="panel">
@@ -85,8 +86,8 @@
     <h2>历史初始化（策略股票池）</h2>
     <p class="muted">这里只初始化当前策略股票池，不要求把排除的 ST 等股票也下载。V2.1.3 的 60 秒硬超时、错误隔离和断点续传继续保留。</p>
     <form method="post" action="/admin/bootstrap" class="toolbar compact-toolbar">
-      <label>本批股票数<input id="bootstrap-limit" name="limit" type="number" value="{{ batch_size }}" min="1" max="500" {% if bootstrap_busy %}disabled{% endif %}></label>
-      <button id="bootstrap-button" type="submit" {% if bootstrap_busy %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else '后台初始化下一批' }}</button>
+      <label>本批股票数<input id="bootstrap-limit" name="limit" type="number" value="{{ batch_size }}" min="1" max="500" {% if bootstrap_busy or stats.bootstrap_coverage >= 0.9999 %}disabled{% endif %}></label>
+      <button id="bootstrap-button" type="submit" {% if bootstrap_busy or stats.bootstrap_coverage >= 0.9999 %}disabled{% endif %}>{{ '数据任务运行中' if bootstrap_busy else ('历史初始化已完成' if stats.bootstrap_coverage >= 0.9999 else '后台初始化下一批') }}</button>
     </form>
     <form id="retry-form" method="post" action="/admin/bootstrap-errors" class="toolbar compact-toolbar" style="margin-top:12px;{% if not stats.bootstrap_errors %}display:none{% endif %}">
       <label>错误重试数<input id="retry-limit" name="limit" type="number" value="20" min="1" max="100" {% if bootstrap_busy %}disabled{% endif %}></label>
@@ -97,7 +98,7 @@
   <section class="panel">
     <span class="eyebrow">POST-CLOSE DAILY</span>
     <h2>收盘后更新 + ABC扫描</h2>
-    <p class="muted">V2.1.5 仍只在“当天为 A 股交易日 + 北京时间16:10以后”允许实时快照写入当日日线；并且快照覆盖率不足 {{ '{:.0%}'.format(stats.latest_coverage_threshold) }} 时不会触发正式扫描。</p>
+    <p class="muted">V2.1.6 仍只在“当天为 A 股交易日 + 北京时间16:10以后”允许实时快照写入当日日线；并且快照覆盖率不足 {{ '{:.0%}'.format(stats.latest_coverage_threshold) }} 时不会触发正式扫描。</p>
     <form method="post" action="/admin/daily-update">
       <button type="submit" class="primary">立即执行一次安全盘后更新</button>
     </form>
@@ -127,116 +128,19 @@
 
 <script>
 (() => {
-  const ACTIVE_MS = 3000;
-  const IDLE_MS = 15000;
-  const HIDDEN_MS = 15000;
-  const TARGET_DATE = "{{ stats.expected_latest or stats.latest or '' }}";
-  let timer = null;
-
-  const el = (id) => document.getElementById(id);
-  const fmtInt = (v) => Number(v || 0).toLocaleString('zh-CN');
-  const fmtPct = (v) => `${(Number(v || 0) * 100).toFixed(1)}%`;
-
-  function setBusy(busy) {
-    ['bootstrap-limit','bootstrap-button','retry-limit','retry-button','repair-limit','repair-button'].forEach((id) => {
-      const node = el(id);
-      if (node) node.disabled = !!busy;
-    });
-    if (el('bootstrap-button')) el('bootstrap-button').textContent = busy ? '数据任务运行中' : '后台初始化下一批';
-    if (el('repair-button')) el('repair-button').textContent = busy ? '数据任务运行中' : '修复最新日线缺口';
-  }
-
-  function applyData(data) {
-    const s = data.stats || {};
-    const pool = Number(s.strategy_pool || 0);
-    const done = Number(s.bootstrap_done || 0);
-    const latestRows = Number(s.latest_strategy_rows || 0);
-    const latestPct = Number(s.latest_bar_coverage || 0);
-
-    if (el('metric-bars')) el('metric-bars').textContent = fmtInt(s.bars);
-    if (el('metric-strategy-pool')) el('metric-strategy-pool').textContent = fmtInt(pool);
-    if (el('metric-bootstrap-done')) el('metric-bootstrap-done').textContent = `${fmtInt(done)}/${fmtInt(pool)}`;
-    if (el('metric-coverage')) el('metric-coverage').textContent = fmtPct(s.bootstrap_coverage);
-
-    if (el('metric-latest-coverage')) {
-      el('metric-latest-coverage').textContent = fmtPct(latestPct);
-      el('metric-latest-coverage').className = latestPct >= Number(s.latest_threshold || 0.95) ? 'ok' : 'warn-text';
-    }
-    if (el('latest-pool')) el('latest-pool').textContent = fmtInt(pool);
-    if (el('latest-rows')) el('latest-rows').textContent = fmtInt(latestRows);
-    if (el('latest-pct')) {
-      el('latest-pct').textContent = fmtPct(latestPct);
-      el('latest-pct').className = latestPct >= Number(s.latest_threshold || 0.95) ? 'ok' : 'warn-text';
-    }
-
-    const errors = el('metric-errors');
-    if (errors) {
-      errors.textContent = fmtInt(s.bootstrap_errors);
-      errors.className = Number(s.bootstrap_errors || 0) > 0 ? 'warn-text' : 'ok';
-    }
-    const retryForm = el('retry-form');
-    if (retryForm) retryForm.style.display = Number(s.bootstrap_errors || 0) > 0 ? '' : 'none';
-
-    const u = data.update;
-    if (u) {
-      if (el('live-task-summary')) {
-        el('live-task-summary').textContent =
-          `${u.status} ｜ ${u.provider || '-'} ｜ ${u.start_date || '-'} → ${u.end_date || '-'} ｜ ` +
-          `成功 ${fmtInt(u.success_count)}/${fmtInt(u.stock_count)} ｜ 失败 ${fmtInt(u.failed_count)}`;
-      }
-      if (el('live-running-hint')) el('live-running-hint').textContent = u.status === 'running' ? ' ｜ 正在执行，页面每 3 秒自动更新' : '';
-      if (el('live-task-message')) el('live-task-message').textContent = u.message || '';
-    }
-
-    if (el('metric-scan') && el('metric-scan').textContent !== 'READY') {
-      const historyOk = Number(s.bootstrap_coverage || 0) >= Number(s.history_threshold || 0.95);
-      const latestOk = latestPct >= Number(s.latest_threshold || 0.95);
-      el('metric-scan').textContent = historyOk && latestOk ? '待核验' : 'BLOCKED';
-      el('metric-scan').className = 'warn-text';
-    }
-
-    setBusy(!!data.data_busy);
-  }
-
-  function schedule(ms) {
-    clearTimeout(timer);
-    timer = setTimeout(poll, document.hidden ? Math.max(ms, HIDDEN_MS) : ms);
-  }
-
-  async function poll() {
-    const status = el('live-poll-status');
-    try {
-      const suffix = TARGET_DATE ? `?target=${encodeURIComponent(TARGET_DATE)}` : '';
-      const res = await fetch(`/api/data/progress${suffix}`, {
-        cache: 'no-store',
-        headers: { 'Accept': 'application/json' },
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      applyData(data);
-
-      if (status) {
-        status.textContent = `自动刷新：已连接 · ${new Date().toLocaleTimeString('zh-CN', {hour12:false})}`;
-        status.className = 'ok';
-      }
-      schedule(data.data_busy ? ACTIVE_MS : IDLE_MS);
-    } catch (err) {
-      if (status) {
-        status.textContent = '自动刷新：连接重试中';
-        status.className = 'warn-text';
-      }
-      schedule(document.hidden ? HIDDEN_MS : 5000);
-    }
-  }
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) {
-      clearTimeout(timer);
-      poll();
-    }
-  });
-
-  poll();
+  const ACTIVE_MS=3000, IDLE_MS=15000, HIDDEN_MS=15000;
+  const TARGET_DATE="{{ stats.expected_latest or stats.latest or '' }}";
+  let timer=null, polls=0, lastBusy={{ 'true' if bootstrap_busy else 'false' }};
+  const el=id=>document.getElementById(id);
+  const fmtInt=v=>Number(v||0).toLocaleString('zh-CN');
+  const fmtPct=v=>`${(Number(v||0)*100).toFixed(1)}%`;
+  function setBusy(b){ ['bootstrap-limit','bootstrap-button','retry-limit','retry-button','repair-limit','repair-button'].forEach(id=>{const n=el(id);if(n)n.disabled=!!b;}); if(el('repair-button'))el('repair-button').textContent=b?'数据任务运行中':'修复最新日线缺口'; }
+  function apply(d){ const u=d.update; if(u){ if(el('live-task-summary'))el('live-task-summary').textContent=`${u.status} ｜ ${u.provider||'-'} ｜ ${u.start_date||'-'} → ${u.end_date||'-'} ｜ 成功 ${fmtInt(u.success_count)}/${fmtInt(u.stock_count)} ｜ 失败 ${fmtInt(u.failed_count)}`; if(el('live-running-hint'))el('live-running-hint').textContent=u.status==='running'?' ｜ 正在执行，页面每 3 秒自动更新':''; if(el('live-task-message'))el('live-task-message').textContent=u.message||''; }
+    if(d.stats){const s=d.stats,p=Number(s.strategy_pool||0),r=Number(s.latest_strategy_rows||0),pct=Number(s.latest_bar_coverage||0); if(el('metric-bars'))el('metric-bars').textContent=fmtInt(s.bars); if(el('metric-bootstrap-done'))el('metric-bootstrap-done').textContent=`${fmtInt(s.bootstrap_done)}/${fmtInt(p)}`; if(el('metric-coverage'))el('metric-coverage').textContent=fmtPct(s.bootstrap_coverage); if(el('latest-rows'))el('latest-rows').textContent=fmtInt(r); if(el('latest-pct'))el('latest-pct').textContent=fmtPct(pct); if(el('metric-latest-coverage'))el('metric-latest-coverage').textContent=fmtPct(pct);}
+    setBusy(!!d.data_busy); }
+  function schedule(ms){clearTimeout(timer);timer=setTimeout(poll,document.hidden?Math.max(ms,HIDDEN_MS):ms);}
+  async function poll(){polls++; const full=(polls===1)||(lastBusy&&polls%10===0)||(!lastBusy&&polls%4===0); const parts=[]; if(TARGET_DATE)parts.push(`target=${encodeURIComponent(TARGET_DATE)}`); if(full)parts.push('full=1'); const qs=parts.length?'?'+parts.join('&'):''; const status=el('live-poll-status'); try{const res=await fetch('/api/data/progress'+qs,{cache:'no-store',headers:{Accept:'application/json'}}); if(!res.ok)throw new Error(); const d=await res.json(); apply(d); if(lastBusy&&!d.data_busy)polls=0; lastBusy=!!d.data_busy; if(status){status.textContent=`自动刷新：已连接 · ${new Date().toLocaleTimeString('zh-CN',{hour12:false})}`;status.className='ok';} schedule(d.data_busy?ACTIVE_MS:IDLE_MS);}catch(e){if(status){status.textContent='自动刷新：连接重试中';status.className='warn-text';}schedule(document.hidden?HIDDEN_MS:5000);}}
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden){polls=0;clearTimeout(timer);poll();}}); poll();
 })();
 </script>
 

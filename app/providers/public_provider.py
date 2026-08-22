@@ -157,6 +157,15 @@ class PublicDataProvider(DataProvider):
             x[c] = _to_num(x[c])
         return x[cols].dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
 
+    def repair_history(self, code: str, start: date, end: date) -> pd.DataFrame:
+        """Fast short-gap path: AKShare first; BaoStock only confirms empty intervals."""
+        code = str(code).zfill(6)
+        x = self._history_akshare(code, start, end)
+        if x is not None and not x.empty:
+            return x
+        return self._history_baostock(code, start, end)
+
+
     def trade_dates(self, start: date, end: date) -> list[date]:
         try:
             with _BaoSession():
