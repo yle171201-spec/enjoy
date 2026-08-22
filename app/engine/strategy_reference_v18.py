@@ -225,6 +225,76 @@ def build_market_context(stocks: Dict[str,pd.DataFrame]) -> MarketContext:
     return MarketContext(calendar, cal_pos, q40, above20, mom20)
 
 
+
+def build_market_context_compact(stocks: Dict[str,pd.DataFrame]) -> MarketContext:
+    """Memory-compact equivalent of build_market_context()."""
+    eligible = [(code, df) for code, df in stocks.items() if eligible_code(code)]
+    if not eligible:
+        raise ValueError("no eligible stocks for market context")
+
+    date_chunks = [
+        df["date"].to_numpy(dtype="datetime64[ns]", copy=False)
+        for _, df in eligible
+        if len(df)
+    ]
+    if not date_chunks:
+        raise ValueError("no dates for market context")
+
+    all_dates = np.concatenate(date_chunks)
+    calendar = pd.DatetimeIndex(np.unique(all_dates))
+    del all_dates, date_chunks
+
+    cal_pos = {pd.Timestamp(d): i for i, d in enumerate(calendar)}
+    n_dates = len(calendar)
+    n_stocks = len(eligible)
+
+    abase_matrix = np.full((n_dates, n_stocks), np.nan, dtype=np.float64)
+    above_sum = np.zeros(n_dates, dtype=np.float64)
+    above_n = np.zeros(n_dates, dtype=np.int64)
+    mom_sum = np.zeros(n_dates, dtype=np.float64)
+    mom_n = np.zeros(n_dates, dtype=np.int64)
+
+    for j, (_, df) in enumerate(eligible):
+        dates = pd.DatetimeIndex(df["date"])
+        pos = calendar.get_indexer(dates)
+        ok = pos >= 0
+        if not np.any(ok):
+            continue
+        pp = pos[ok]
+
+        abase = df["abase"].to_numpy(dtype=float, copy=False)[ok]
+        abase_matrix[pp, j] = abase
+
+        ma20 = df["ma20"].to_numpy(dtype=float, copy=False)[ok]
+        above = df["above20_flag"].to_numpy(dtype=bool, copy=False)[ok]
+        valid = np.isfinite(ma20)
+        if np.any(valid):
+            np.add.at(above_sum, pp[valid], above[valid].astype(np.float64))
+            np.add.at(above_n, pp[valid], 1)
+
+        stock20 = df["stock20"].to_numpy(dtype=float, copy=False)[ok]
+        mom = df["mom20_flag"].to_numpy(dtype=bool, copy=False)[ok]
+        valid = np.isfinite(stock20)
+        if np.any(valid):
+            np.add.at(mom_sum, pp[valid], mom[valid].astype(np.float64))
+            np.add.at(mom_n, pp[valid], 1)
+
+    with np.errstate(all="ignore"):
+        qvals = np.nanquantile(abase_matrix, 0.40, axis=1, method="linear")
+    q40 = pd.Series(qvals, index=calendar)
+    del abase_matrix
+
+    above_vals = np.full(n_dates, np.nan, dtype=float)
+    mom_vals = np.full(n_dates, np.nan, dtype=float)
+    np.divide(above_sum, above_n, out=above_vals, where=above_n > 0)
+    np.divide(mom_sum, mom_n, out=mom_vals, where=mom_n > 0)
+
+    above20 = pd.Series(above_vals, index=calendar)
+    mom20 = pd.Series(mom_vals, index=calendar)
+    return MarketContext(calendar, cal_pos, q40, above20, mom20)
+
+
+
 def mainstream_ok(df: pd.DataFrame, t: int, market: MarketContext, p: P=PARAM) -> bool:
     d = pd.Timestamp(df["date"].iloc[t])
     abase = df["abase"].iloc[t]
@@ -1022,19 +1092,18 @@ def enrich_close_entry(signals: pd.DataFrame,p: P=PARAM) -> pd.DataFrame:
     return z
 
 
+
 def run_close_reference(
     raw_stocks: Dict[str,pd.DataFrame],
     p: P=PARAM,
     run_exits: bool=True,
     progress_cb=None,
+    memory_safe: bool=False,
 ) -> Tuple[pd.DataFrame,dict]:
     """
     End-to-end reference entry engine.
 
-    progress_cb is observability-only. It receives:
-        progress_cb(stage: str, fraction: float, detail: str)
-    and MUST NOT affect any trading calculation. Callback exceptions are swallowed
-    deliberately so telemetry can never change V18 results.
+    memory_safe=True changes allocation only, not strategy math.
     """
     def emit(stage: str, fraction: float, detail: str = "") -> None:
         if progress_cb is None:
@@ -1044,21 +1113,55 @@ def run_close_reference(
         except Exception:
             pass
 
-    stocks={}
-    items=list(raw_stocks.items())
-    total=max(1,len(items))
-    step=max(1,len(items)//40)
+    total=max(1,len(raw_stocks))
+    step=max(1,len(raw_stocks)//40)
 
-    emit("V18数据预处理", 0.00, f"准备处理 {len(items)} 只股票")
-    for i,(code,df) in enumerate(items, start=1):
-        c=norm_code(code)
-        if eligible_code(c):
-            stocks[c]=prepare_stock(df,c)
-        if i==len(items) or i%step==0:
-            emit("V18数据预处理", 0.18*(i/total), f"已预处理 {i}/{len(items)} 只股票")
+    if memory_safe:
+        import gc
+        keys=list(raw_stocks.keys())
+        emit("V18数据预处理", 0.00, f"内存安全模式：准备处理 {len(keys)} 只股票")
+        for i, code in enumerate(keys, start=1):
+            c=norm_code(code)
+            if not eligible_code(c):
+                raw_stocks.pop(code, None)
+                continue
 
-    emit("构建市场横截面", 0.20, f"策略有效股票 {len(stocks)} 只")
-    market=build_market_context(stocks)
+            prepared=prepare_stock(raw_stocks[code], c)
+
+            # Current V18 stock-frame consumers never read df["code"] / df.code.
+            # The installer checks those exact access patterns before enabling this.
+            if "code" in prepared.columns:
+                del prepared["code"]
+
+            if c == code:
+                raw_stocks[code]=prepared
+            else:
+                raw_stocks[c]=prepared
+                raw_stocks.pop(code, None)
+
+            if i==len(keys) or i%step==0:
+                gc.collect()
+                emit("V18数据预处理", 0.18*(i/total), f"已原位预处理 {i}/{len(keys)} 只股票")
+
+        stocks=raw_stocks
+        gc.collect()
+        emit("构建市场横截面", 0.20, f"紧凑横截面；策略有效股票 {len(stocks)} 只")
+        market=build_market_context_compact(stocks)
+        gc.collect()
+    else:
+        stocks={}
+        items=list(raw_stocks.items())
+        emit("V18数据预处理", 0.00, f"准备处理 {len(items)} 只股票")
+        for i,(code,df) in enumerate(items, start=1):
+            c=norm_code(code)
+            if eligible_code(c):
+                stocks[c]=prepare_stock(df,c)
+            if i==len(items) or i%step==0:
+                emit("V18数据预处理", 0.18*(i/total), f"已预处理 {i}/{len(items)} 只股票")
+
+        emit("构建市场横截面", 0.20, f"策略有效股票 {len(stocks)} 只")
+        market=build_market_context(stocks)
+
     emit("构建市场横截面", 0.23, "q40 / above20 / mom20 已完成")
 
     emit("Engine A", 0.24, "正在扫描 A 结构")

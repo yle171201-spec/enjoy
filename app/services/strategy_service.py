@@ -7,13 +7,25 @@ import pandas as pd
 
 from ..engine.strategy_reference_v18 import run_close_reference, compare_to_golden
 from ..models import ScanRun, DailyBar
-from .repository import load_all_frames, replace_signals, latest_trade_date
+from .repository import (
+    load_all_frames, load_all_frames_batched, replace_signals, latest_trade_date,
+)
 from .data_update import scan_readiness
 from ..config import settings
 from sqlalchemy import select, func
 
 GOLDEN = Path(__file__).resolve().parents[2] / "golden" / "ABC_V18_历史信号载荷.csv"
 _PROGRESS_PREFIX = "__SCAN_PROGRESS__:"
+
+
+def _rss_mb() -> float | None:
+    try:
+        import resource, sys
+        value = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        return value / (1024.0 * 1024.0) if sys.platform == "darwin" else value / 1024.0
+    except Exception:
+        return None
+
 
 
 def _attach_exit_dates(sig: pd.DataFrame, frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -64,7 +76,7 @@ def scan_progress_payload(run: ScanRun | None) -> dict:
     elapsed = max(0, int((end - run.started_at).total_seconds())) if run.started_at else 0
 
     progress = {}
-    if run.status == "running" and (run.message or "").startswith(_PROGRESS_PREFIX):
+    if (run.message or "").startswith(_PROGRESS_PREFIX):
         try:
             progress = json.loads((run.message or "")[len(_PROGRESS_PREFIX):])
         except Exception:
@@ -106,7 +118,13 @@ def recover_interrupted_scans(db) -> int:
         stage = progress.get("stage") or "未知阶段"
         pct = progress.get("percent") or 0
         run.status = "interrupted"
-        run.message = f"服务重启中断扫描；中断前阶段：{stage}（{pct:.1f}%）。可安全重新运行。"
+        detail = f"服务重启中断扫描；中断前阶段：{stage}（{pct:.1f}%）。可安全重新运行。"
+        run.message = _PROGRESS_PREFIX + json.dumps({
+            "percent": float(pct),
+            "stage": "interrupted",
+            "detail": detail,
+            "updated_at": datetime.utcnow().isoformat(timespec="seconds"),
+        }, ensure_ascii=False)
         run.finished_at = datetime.utcnow()
     db.commit()
     return len(runs)
@@ -145,23 +163,50 @@ def run_full_scan(db, force: bool = False):
         db.commit()
 
         cutoff = latest - timedelta(days=settings.live_scan_calendar_days) if latest else None
-        _set_progress(db, run, 8, "加载全市场日线", f"读取 {cutoff or '-'} → {latest or '-'} 的策略历史窗口")
-        frames = load_all_frames(db, start_date=cutoff)
+        _set_progress(db, run, 8, "加载全市场日线", f"分批读取 {cutoff or '-'} → {latest or '-'}；避免一次性载入百万行 DataFrame")
+
+        def load_progress(done: int, total: int, assembled: int) -> None:
+            pct = 8.0 + 14.0 * (done / max(1, total))
+            rss = _rss_mb()
+            mem = f"；峰值RSS {rss:.0f} MB" if rss is not None else ""
+            _set_progress(
+                db, run, pct, "加载全市场日线",
+                f"已读取 {done}/{total} 只；已组装 {assembled} 只{mem}"
+            )
+
+        frames = load_all_frames_batched(
+            db,
+            start_date=cutoff,
+            batch_size=settings.scan_frame_batch_size,
+            progress_cb=load_progress,
+        )
         if not frames:
             raise RuntimeError("数据库没有日线数据，请先更新/导入数据")
 
-        _set_progress(db, run, 22, "加载全市场日线", f"已载入 {len(frames)} 只股票，准备进入 V18")
+        rss = _rss_mb()
+        mem = f"；峰值RSS {rss:.0f} MB" if rss is not None else ""
+        _set_progress(db, run, 22, "加载全市场日线", f"已分批载入 {len(frames)} 只股票{mem}，准备进入 V18")
 
         def engine_progress(stage: str, fraction: float, detail: str = "") -> None:
             overall = 24.0 + 64.0 * float(max(0.0, min(1.0, fraction)))
-            _set_progress(db, run, overall, stage, detail)
+            rss = _rss_mb()
+            mem = f"；峰值RSS {rss:.0f} MB" if rss is not None else ""
+            _set_progress(db, run, overall, stage, detail + mem)
 
-        sig, diag = run_close_reference(frames, run_exits=True, progress_cb=engine_progress)
+        sig, diag = run_close_reference(
+            frames,
+            run_exits=True,
+            progress_cb=engine_progress,
+            memory_safe=True,
+        )
 
         _set_progress(db, run, 90, "整理信号", f"V18 返回 {len(sig)} 条历史事件")
         sig = _attach_exit_dates(sig, frames)
+        frames.clear()
+        import gc
+        gc.collect()
 
-        _set_progress(db, run, 94, "写入信号", "替换数据库中的 V18 信号结果")
+        _set_progress(db, run, 94, "写入信号", "已释放全市场K线内存；替换数据库中的 V18 信号结果")
         replace_signals(db, sig, "V18")
 
         _set_progress(db, run, 97, "结果校验", "统计 A/B/C；检查是否具备 Golden 历史窗口")

@@ -137,6 +137,54 @@ def load_all_frames(db, start_date=None):
     return _df_to_frames(x)
 
 
+
+def load_all_frames_batched(
+    db,
+    start_date=None,
+    batch_size: int = 160,
+    progress_cb=None,
+):
+    """Load all frames in small code batches to cap peak pandas memory."""
+    import gc
+
+    code_stmt = select(DailyBar.code).distinct().order_by(DailyBar.code)
+    if start_date is not None:
+        code_stmt = code_stmt.where(DailyBar.trade_date >= start_date)
+
+    codes = [str(x).zfill(6) for x in db.execute(code_stmt).scalars().all()]
+    if not codes:
+        return {}
+
+    batch_size = max(20, int(batch_size))
+    out = {}
+    cols = [
+        DailyBar.code, DailyBar.trade_date, DailyBar.open, DailyBar.high,
+        DailyBar.low, DailyBar.close, DailyBar.volume, DailyBar.amount,
+        DailyBar.turnover,
+    ]
+
+    total = len(codes)
+    for start in range(0, total, batch_size):
+        batch = codes[start:start + batch_size]
+        stmt = select(*cols).where(DailyBar.code.in_(batch))
+        if start_date is not None:
+            stmt = stmt.where(DailyBar.trade_date >= start_date)
+        stmt = stmt.order_by(DailyBar.code, DailyBar.trade_date)
+
+        x = pd.read_sql(stmt, db.bind)
+        out.update(_df_to_frames(x))
+        del x
+        gc.collect()
+
+        done = min(total, start + len(batch))
+        if progress_cb is not None:
+            progress_cb(done, total, len(out))
+
+    return out
+
+
+
+
 def load_frames_for_codes(db, codes, start_date=None):
     codes = sorted({str(c).zfill(6) for c in codes})
     if not codes:
