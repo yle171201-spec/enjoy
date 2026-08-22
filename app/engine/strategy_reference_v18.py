@@ -265,15 +265,22 @@ def build_market_context_compact(stocks: Dict[str,pd.DataFrame]) -> MarketContex
         abase = df["abase"].to_numpy(dtype=float, copy=False)[ok]
         abase_matrix[pp, j] = abase
 
+        close = df["close"].to_numpy(dtype=float, copy=False)[ok]
         ma20 = df["ma20"].to_numpy(dtype=float, copy=False)[ok]
-        above = df["above20_flag"].to_numpy(dtype=bool, copy=False)[ok]
+        above = close > ma20
         valid = np.isfinite(ma20)
         if np.any(valid):
             np.add.at(above_sum, pp[valid], above[valid].astype(np.float64))
             np.add.at(above_n, pp[valid], 1)
 
-        stock20 = df["stock20"].to_numpy(dtype=float, copy=False)[ok]
-        mom = df["mom20_flag"].to_numpy(dtype=bool, copy=False)[ok]
+        # Same formula as prepare_stock()["stock20"], derived on demand so the
+        # full-market live frame does not retain stock20/mom20_flag.
+        full_close = df["close"].to_numpy(dtype=float, copy=False)
+        stock20_full = np.full(len(full_close), np.nan, dtype=float)
+        if len(full_close) > 20:
+            stock20_full[20:] = full_close[20:] / full_close[:-20] - 1
+        stock20 = stock20_full[ok]
+        mom = stock20 > 0
         valid = np.isfinite(stock20)
         if np.any(valid):
             np.add.at(mom_sum, pp[valid], mom[valid].astype(np.float64))
@@ -293,6 +300,31 @@ def build_market_context_compact(stocks: Dict[str,pd.DataFrame]) -> MarketContex
     mom20 = pd.Series(mom_vals, index=calendar)
     return MarketContext(calendar, cal_pos, q40, above20, mom20)
 
+
+
+
+def trim_live_prepared_frame(df: pd.DataFrame) -> pd.DataFrame:
+    # Live memory-safe mode only: drop columns redundant after prepare_stock().
+    drop = [
+        "code", "amount", "ma60",
+        "stock20", "above20_flag", "mom20_flag",
+        "r5", "er10",
+    ]
+    return df.drop(columns=[c for c in drop if c in df.columns])
+
+
+def ensure_exit_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    # Restore the exact canonical exit-only indicators lazily for signal stocks.
+    if "r5" not in df.columns:
+        df["r5"] = df["close"] / df["close"].shift(5) - 1
+    if "er10" not in df.columns:
+        delta = df["close"].diff()
+        den = delta.abs().rolling(10, min_periods=10).sum()
+        df["er10"] = (
+            (df["close"] - df["close"].shift(10))
+            / den.replace(0, np.nan)
+        )
+    return df
 
 
 def mainstream_ok(df: pd.DataFrame, t: int, market: MarketContext, p: P=PARAM) -> bool:
@@ -942,6 +974,7 @@ def attach_c_risk(csig: pd.DataFrame, stocks: Dict[str,pd.DataFrame]) -> pd.Data
 
 
 def exit_a(row,df: pd.DataFrame,p: P=PARAM):
+    df=ensure_exit_indicators(df)
     df=ensure_cost50(df)
     h=df["high"].to_numpy(float);c=df["close"].to_numpy(float)
     ma10=df["ma10"].to_numpy(float);ma20=df["ma20"].to_numpy(float)
@@ -984,6 +1017,7 @@ def exit_a(row,df: pd.DataFrame,p: P=PARAM):
 
 
 def exit_b(row,df: pd.DataFrame,p: P=PARAM):
+    df=ensure_exit_indicators(df)
     h=df["high"].to_numpy(float);c=df["close"].to_numpy(float)
     ma10=df["ma10"].to_numpy(float);ma20=df["ma20"].to_numpy(float)
     er=df["er10"].to_numpy(float)
@@ -1018,6 +1052,7 @@ def exit_b(row,df: pd.DataFrame,p: P=PARAM):
 
 
 def exit_c(row,df: pd.DataFrame,p: P=PARAM):
+    df=ensure_exit_indicators(df)
     df=ensure_cost50(df)
     h=df["high"].to_numpy(float);c=df["close"].to_numpy(float)
     ma10=df["ma10"].to_numpy(float);ma20=df["ma20"].to_numpy(float)
@@ -1127,11 +1162,7 @@ def run_close_reference(
                 continue
 
             prepared=prepare_stock(raw_stocks[code], c)
-
-            # Current V18 stock-frame consumers never read df["code"] / df.code.
-            # The installer checks those exact access patterns before enabling this.
-            if "code" in prepared.columns:
-                del prepared["code"]
+            prepared=trim_live_prepared_frame(prepared)
 
             if c == code:
                 raw_stocks[code]=prepared

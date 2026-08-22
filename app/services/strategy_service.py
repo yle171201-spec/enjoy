@@ -117,8 +117,12 @@ def recover_interrupted_scans(db) -> int:
         progress = scan_progress_payload(run)
         stage = progress.get("stage") or "未知阶段"
         pct = progress.get("percent") or 0
+        prev_detail = progress.get("detail") or ""
         run.status = "interrupted"
-        detail = f"服务重启中断扫描；中断前阶段：{stage}（{pct:.1f}%）。可安全重新运行。"
+        detail = f"服务重启中断扫描；中断前阶段：{stage}（{pct:.1f}%）。"
+        if prev_detail:
+            detail += f" 中断前记录：{prev_detail}。"
+        detail += " 可安全重新运行。"
         run.message = _PROGRESS_PREFIX + json.dumps({
             "percent": float(pct),
             "stage": "interrupted",
