@@ -12,7 +12,7 @@ from sqlalchemy import select, func, distinct, text
 
 from .config import settings
 from .db import init_db, db_session, SessionLocal
-from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock, LatestDayAudit, LiveScanRun
+from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock, LatestDayAudit, LiveScanRun, SignalReview
 from .auth import valid_password, make_cookie, is_logged_in, COOKIE
 from .services.repository import latest_trade_date, latest_prices
 from .services.strategy_service import (
@@ -24,6 +24,9 @@ from .services.live_scan import (
 )
 from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.chart_service import build_stock_chart
+from .services.review_service import (
+    review_index_data, review_case_data, save_signal_review, build_review_chart,
+)
 from .services.data_update import (
     data_stats, bootstrap_batch, sync_daily_public, scan_readiness,
     recover_interrupted_runs, repair_latest_gaps, audit_latest_day,
@@ -410,6 +413,73 @@ def dashboard(request: Request, db=Depends(db_session)):
         "golden_status": golden_status, "update": update, "state": state,
         "web_version": settings.web_version,
     })
+
+@app.get("/review", response_class=HTMLResponse)
+def review_center(
+    request: Request,
+    engine: str = Query("ALL"),
+    outcome: str = Query("ALL"),
+    rating: str = Query("ALL"),
+    sort: str = Query("DATE_DESC"),
+    db=Depends(db_session),
+):
+    data = review_index_data(
+        db,
+        engine=engine,
+        outcome=outcome,
+        rating=rating,
+        sort=sort,
+    )
+    return templates.TemplateResponse("review.html", {
+        "request": request,
+        **data,
+    })
+
+
+@app.get("/review/{signal_id}", response_class=HTMLResponse)
+def review_case(
+    request: Request,
+    signal_id: int,
+    saved: int = Query(0),
+    db=Depends(db_session),
+):
+    case = review_case_data(db, signal_id)
+    if case is None:
+        raise HTTPException(404, "historical V18 signal not found")
+    return templates.TemplateResponse("review_case.html", {
+        "request": request,
+        "case": case,
+        "saved": bool(saved),
+    })
+
+
+@app.post("/review/{signal_id}/save")
+def save_review_case(
+    signal_id: int,
+    rating: str = Form(""),
+    tags: list[str] = Form(default=[]),
+    note: str = Form(""),
+    db=Depends(db_session),
+):
+    try:
+        save_signal_review(db, signal_id, rating, tags, note)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return RedirectResponse(f"/review/{signal_id}?saved=1", 303)
+
+
+@app.get("/api/review/{signal_id}/chart")
+def review_case_chart(
+    signal_id: int,
+    pre: int = Query(60, ge=20, le=120),
+    post: int = Query(40, ge=20, le=120),
+    db=Depends(db_session),
+):
+    chart = build_review_chart(db, signal_id, pre=pre, post=post)
+    if not chart.get("bars"):
+        raise HTTPException(404, "review chart not found")
+    return chart
+
 
 @app.get("/screener", response_class=HTMLResponse)
 def screener(

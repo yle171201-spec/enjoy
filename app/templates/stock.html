@@ -6,8 +6,8 @@
 <div class="legend"><span class="dot a"></span>A结构 <span class="dot b"></span>B结构 <span class="dot c"></span>C结构 <span class="dot sell"></span>退出</div>
 <section>
 <h2>历史正式信号</h2>
-<div class="table-wrap"><table><thead><tr><th>日期</th><th>类型</th><th>信号价</th><th>失效价</th><th>结构风险</th><th>目标仓位</th><th>退出日期</th><th>退出原因</th><th>动态收益</th></tr></thead><tbody>
-{% for s in signals %}<tr><td>{{s.signal_date}}</td><td><span class="tag tag-{{s.engine}}">{{s.engine}}</span></td><td>{{'%.2f'|format(s.signal_close)}}</td><td>{{'%.2f'|format(s.fail_price)}}</td><td>{{'%.1f%%'|format(s.risk_pct*100)}}</td><td>{{'%.1f%%'|format(s.target_weight*100)}}</td><td>{{s.exit_date or '-'}}</td><td>{{s.exit_reason or '-'}}</td><td class="{{'pos' if s.exit_ret is not none and s.exit_ret>0 else 'neg' if s.exit_ret is not none else ''}}">{{'%.1f%%'|format(s.exit_ret*100) if s.exit_ret is not none else '-'}}</td></tr>{% endfor %}
+<div class="table-wrap"><table><thead><tr><th>日期</th><th>类型</th><th>信号价</th><th>失效价</th><th>结构风险</th><th>目标仓位</th><th>退出日期</th><th>退出原因</th><th>动态收益</th><th>复盘</th></tr></thead><tbody>
+{% for s in signals %}<tr><td>{{s.signal_date}}</td><td><span class="tag tag-{{s.engine}}">{{s.engine}}</span></td><td>{{'%.2f'|format(s.signal_close)}}</td><td>{{'%.2f'|format(s.fail_price)}}</td><td>{{'%.1f%%'|format(s.risk_pct*100)}}</td><td>{{'%.1f%%'|format(s.target_weight*100)}}</td><td>{{s.exit_date or '-'}}</td><td>{{s.exit_reason or '-'}}</td><td class="{{'pos' if s.exit_ret is not none and s.exit_ret>0 else 'neg' if s.exit_ret is not none else ''}}">{{'%.1f%%'|format(s.exit_ret*100) if s.exit_ret is not none else '-'}}</td><td>{% if s.strategy_version=='V18' %}<a class="btn ghost" href="/review/{{s.id}}">复盘</a>{% else %}-{% endif %}</td></tr>{% endfor %}
 </tbody></table></div>
 </section>
 <script>fetch('/api/stock/{{code}}/chart?limit=620').then(r=>r.json()).then(d=>drawKStructure('chart',d));</script>

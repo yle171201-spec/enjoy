@@ -1,7 +1,7 @@
 function engineColor(e){return e==='A'?'#ff6b7a':e==='B'?'#c278ff':'#43dce8'}
-function markColor(kind,e){if(kind==='sell')return '#5ee49b';if(kind==='fail')return '#8c9db3';return engineColor(e)}
+function markColor(kind,e){if(kind==='sell'||kind==='mfe')return '#5ee49b';if(kind==='mae')return '#ff7382';if(kind==='next')return '#f1c75b';if(kind==='fail')return '#8c9db3';return engineColor(e)}
 
-function drawKStructure(id,d){
+function drawKStructure(id,d,opts={}){
   const el=document.getElementById(id); if(!el)return;
   const c=echarts.init(el);
   const dates=d.bars.map(x=>x.date);
@@ -11,7 +11,7 @@ function drawKStructure(id,d){
   const ma20=d.bars.map(x=>x.ma20);
   const marks=(d.markers||[]).map(m=>({
     name:m.label,coord:[m.date,m.price],value:m.label,
-    symbol:m.kind==='fail'?'circle':m.kind==='sell'?'pin':'pin',symbolSize:m.kind==='fail'?18:42,
+    symbol:m.kind==='fail'?'circle':(m.kind==='mfe'||m.kind==='mae')?'circle':m.kind==='next'?'diamond':'pin',symbolSize:m.kind==='fail'?18:(m.kind==='mfe'||m.kind==='mae')?26:m.kind==='next'?28:42,
     itemStyle:{color:markColor(m.kind,m.engine)},
     label:{formatter:m.label,color:'#fff',fontWeight:800,fontSize:10}
   }));
@@ -37,7 +37,7 @@ function drawKStructure(id,d){
       {scale:true,splitLine:{lineStyle:{color:'#17283c'}},axisLabel:{color:'#8198b0'}},
       {gridIndex:1,scale:true,splitLine:{show:false},axisLabel:{show:false}}
     ],
-    dataZoom:[{type:'inside',xAxisIndex:[0,1],start:40,end:100},{type:'slider',xAxisIndex:[0,1],bottom:2,height:20,start:40,end:100,borderColor:'#223651',textStyle:{color:'#738aa3'}}],
+    dataZoom:[{type:'inside',xAxisIndex:[0,1],start:opts.start??40,end:opts.end??100},{type:'slider',xAxisIndex:[0,1],bottom:2,height:20,start:opts.start??40,end:opts.end??100,borderColor:'#223651',textStyle:{color:'#738aa3'}}],
     series:[
       {name:'K线',type:'candlestick',data:vals,itemStyle:{color:'#e95d68',color0:'#43c990',borderColor:'#e95d68',borderColor0:'#43c990'},markPoint:{data:marks},markLine:{silent:true,symbol:'none',data:lineData},markArea:{silent:true,data:areaData}},
       {name:'MA10',type:'line',data:ma10,showSymbol:false,smooth:false,lineStyle:{width:1.2,color:'#e9edf4'}},

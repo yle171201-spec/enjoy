@@ -25,7 +25,14 @@ def _date_at(bars, idx):
     return None
 
 
-def build_stock_chart(db, code: str, limit: int = 520) -> dict:
+def build_stock_chart(
+    db,
+    code: str,
+    limit: int = 520,
+    focus_signal_id: int | None = None,
+    pre: int = 60,
+    post: int = 40,
+) -> dict:
     code = str(code).zfill(6)
     all_bars = db.execute(
         select(DailyBar).where(DailyBar.code == code).order_by(DailyBar.trade_date)
@@ -42,14 +49,39 @@ def build_stock_chart(db, code: str, limit: int = 520) -> dict:
     full_df["ma10"] = full_df.close.rolling(10, min_periods=10).mean()
     full_df["ma20"] = full_df.close.rolling(20, min_periods=20).mean()
 
-    start_idx = max(0, len(all_bars) - limit)
-    shown = full_df.iloc[start_idx:].copy()
+    focus_signal = None
+    if focus_signal_id is not None:
+        focus_signal = db.execute(
+            select(Signal).where(
+                Signal.id == int(focus_signal_id),
+                Signal.code == code,
+            )
+        ).scalar_one_or_none()
 
-    signals = db.execute(
-        select(Signal).where(Signal.code == code).order_by(Signal.signal_date)
-    ).scalars().all()
-    live_keys = {(s.signal_date, s.engine) for s in signals if s.strategy_version == "V18-LIVE"}
-    signals = [s for s in signals if s.strategy_version == "V18-LIVE" or (s.signal_date, s.engine) not in live_keys]
+    if focus_signal is not None:
+        focus_idx = next(
+            (i for i, b in enumerate(all_bars) if b.trade_date == focus_signal.signal_date),
+            None,
+        )
+    else:
+        focus_idx = None
+
+    if focus_idx is not None:
+        start_idx = max(0, focus_idx - max(1, int(pre)))
+        end_idx = min(len(all_bars), focus_idx + max(1, int(post)) + 1)
+    else:
+        start_idx = max(0, len(all_bars) - limit)
+        end_idx = len(all_bars)
+    shown = full_df.iloc[start_idx:end_idx].copy()
+
+    if focus_signal is not None:
+        signals = [focus_signal]
+    else:
+        signals = db.execute(
+            select(Signal).where(Signal.code == code).order_by(Signal.signal_date)
+        ).scalars().all()
+        live_keys = {(s.signal_date, s.engine) for s in signals if s.strategy_version == "V18-LIVE"}
+        signals = [s for s in signals if s.strategy_version == "V18-LIVE" or (s.signal_date, s.engine) not in live_keys]
 
     lines = []
     areas = []

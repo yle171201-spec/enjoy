@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}历史复盘{% endblock %}
+{% block content %}
+<section class="hero review-hero">
+  <div>
+    <span class="eyebrow">HISTORICAL REVIEW CENTER</span>
+    <h1>V18 历史复盘</h1>
+    <p>把完整复现得到的历史正式信号当作“病例库”逐笔检查：看买点、后续K线、MFE/MAE、退出结果，并保存你的人工评价。这里不改变任何策略规则。</p>
+  </div>
+  <div class="status">
+    <div>历史信号 <b>{{ summary.total }} 笔</b></div>
+    <div>结构分布 <b>A{{summary.A}} / B{{summary.B}} / C{{summary.C}}</b></div>
+    <div>人工已复盘 <b>{{summary.reviewed}} / {{summary.total}}</b></div>
+    <div>当前筛选 <b>{{filtered_count}} 笔</b></div>
+  </div>
+</section>
+
+<div class="metrics review-summary">
+  <div><span>历史胜率</span><b>{{'%.1f%%'|format(summary.win_rate*100) if summary.win_rate is not none else '-'}}</b></div>
+  <div><span>平均退出收益</span><b class="{{'pos' if summary.avg_ret is not none and summary.avg_ret>0 else 'neg' if summary.avg_ret is not none else ''}}">{{'%.1f%%'|format(summary.avg_ret*100) if summary.avg_ret is not none else '-'}}</b></div>
+  <div><span>Profit Factor</span><b>{{'%.2f'|format(summary.profit_factor) if summary.profit_factor is not none else '-'}}</b></div>
+  <div><span>平均 MFE</span><b class="pos">{{'%.1f%%'|format(summary.avg_mfe*100) if summary.avg_mfe is not none else '-'}}</b></div>
+  <div><span>平均 MAE</span><b class="neg">{{'%.1f%%'|format(summary.avg_mae*100) if summary.avg_mae is not none else '-'}}</b></div>
+  <div><span>复盘进度</span><b>{{'%.0f%%'|format(summary.reviewed/summary.total*100) if summary.total else '0%'}}</b></div>
+</div>
+
+<form class="toolbar review-toolbar" method="get" action="/review">
+  <label>结构
+    <select name="engine">
+      <option value="ALL" {{'selected' if filters.engine=='ALL' else ''}}>全部 A/B/C</option>
+      <option value="A" {{'selected' if filters.engine=='A' else ''}}>A 主仓</option>
+      <option value="B" {{'selected' if filters.engine=='B' else ''}}>B 主仓</option>
+      <option value="C" {{'selected' if filters.engine=='C' else ''}}>C 卫星</option>
+    </select>
+  </label>
+  <label>结果
+    <select name="outcome">
+      <option value="ALL" {{'selected' if filters.outcome=='ALL' else ''}}>全部结果</option>
+      <option value="WIN" {{'selected' if filters.outcome=='WIN' else ''}}>盈利</option>
+      <option value="LOSS" {{'selected' if filters.outcome=='LOSS' else ''}}>亏损/持平</option>
+      <option value="OPEN" {{'selected' if filters.outcome=='OPEN' else ''}}>未退出</option>
+    </select>
+  </label>
+  <label>人工评价
+    <select name="rating">
+      <option value="ALL" {{'selected' if filters.rating=='ALL' else ''}}>全部评价</option>
+      <option value="UNREVIEWED" {{'selected' if filters.rating=='UNREVIEWED' else ''}}>尚未复盘</option>
+      {% for x in ratings %}<option value="{{x}}" {{'selected' if filters.rating==x else ''}}>{{x}}</option>{% endfor %}
+    </select>
+  </label>
+  <label>排序
+    <select name="sort">
+      <option value="DATE_DESC" {{'selected' if filters.sort=='DATE_DESC' else ''}}>信号日期 ↓</option>
+      <option value="RET_DESC" {{'selected' if filters.sort=='RET_DESC' else ''}}>最终收益 ↓</option>
+      <option value="RET_ASC" {{'selected' if filters.sort=='RET_ASC' else ''}}>最终收益 ↑</option>
+      <option value="MFE_DESC" {{'selected' if filters.sort=='MFE_DESC' else ''}}>最大浮盈 ↓</option>
+      <option value="MAE_ASC" {{'selected' if filters.sort=='MAE_ASC' else ''}}>最大回撤优先</option>
+      <option value="UNREVIEWED" {{'selected' if filters.sort=='UNREVIEWED' else ''}}>未复盘优先</option>
+    </select>
+  </label>
+  <button type="submit">应用筛选</button>
+  <a class="btn ghost" href="/review">清空</a>
+</form>
+
+{% if rows %}
+<div class="review-grid">
+{% for r in rows %}
+  <article class="review-card engine-{{r.engine}}">
+    <a class="review-card-main" href="/review/{{r.id}}">
+      <div class="review-card-top">
+        <div>
+          <span class="tag tag-{{r.engine}}">{{r.engine}}</span>
+          <strong>{{r.code}} {{r.name}}</strong>
+          <small>{{r.signal_date}}</small>
+        </div>
+        <div class="review-rating {{'rated' if r.reviewed else ''}}">{{r.rating if r.reviewed else '待复盘'}}</div>
+      </div>
+      <div class="review-card-metrics">
+        <span>最终 <b class="{{'pos' if r.exit_ret is not none and r.exit_ret>0 else 'neg' if r.exit_ret is not none else ''}}">{{'%.1f%%'|format(r.exit_ret*100) if r.exit_ret is not none else '-'}}</b></span>
+        <span>MFE <b class="pos">{{'%.1f%%'|format(r.metrics.mfe*100) if r.metrics.mfe is not none else '-'}}</b></span>
+        <span>MAE <b class="neg">{{'%.1f%%'|format(r.metrics.mae*100) if r.metrics.mae is not none else '-'}}</b></span>
+        <span>持有 <b>{{r.metrics.hold_bars if r.metrics.hold_bars is not none else '-'}}日</b></span>
+      </div>
+      {% if r.tags %}<div class="review-tags">{% for t in r.tags %}<span>{{t}}</span>{% endfor %}</div>{% endif %}
+      <div class="review-card-foot"><span>{{r.exit_reason or '尚未退出'}}</span><b>打开K线复盘 →</b></div>
+    </a>
+  </article>
+{% endfor %}
+</div>
+{% else %}
+<div class="empty"><b>当前筛选没有历史信号。</b><span>可以清空筛选重新查看全部 V18 历史事件。</span></div>
+{% endif %}
+{% endblock %}

@@ -154,3 +154,22 @@ class LiveScanRun(Base):
     combined_count: Mapped[int] = mapped_column(Integer, default=0)
     candidate_count: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str] = mapped_column(Text, default="")
+
+class SignalReview(Base):
+    __tablename__ = "signal_reviews"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    strategy_version: Mapped[str] = mapped_column(String(32), default="V18")
+    code: Mapped[str] = mapped_column(String(6), index=True)
+    signal_date: Mapped[date] = mapped_column(Date, index=True)
+    engine: Mapped[str] = mapped_column(String(1), index=True)
+    rating: Mapped[str] = mapped_column(String(16), default="")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    note: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint(
+            "strategy_version", "code", "signal_date", "engine",
+            name="uq_signal_review_logical_key",
+        ),
+        Index("ix_signal_review_version_date", "strategy_version", "signal_date"),
+    )
