@@ -1025,35 +1025,69 @@ def enrich_close_entry(signals: pd.DataFrame,p: P=PARAM) -> pd.DataFrame:
 def run_close_reference(
     raw_stocks: Dict[str,pd.DataFrame],
     p: P=PARAM,
-    run_exits: bool=True
+    run_exits: bool=True,
+    progress_cb=None,
 ) -> Tuple[pd.DataFrame,dict]:
     """
     End-to-end reference entry engine.
 
-    Returns combined A/B/C close-entry event table.
+    progress_cb is observability-only. It receives:
+        progress_cb(stage: str, fraction: float, detail: str)
+    and MUST NOT affect any trading calculation. Callback exceptions are swallowed
+    deliberately so telemetry can never change V18 results.
     """
+    def emit(stage: str, fraction: float, detail: str = "") -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(stage, float(max(0.0, min(1.0, fraction))), detail)
+        except Exception:
+            pass
+
     stocks={}
-    for code,df in raw_stocks.items():
+    items=list(raw_stocks.items())
+    total=max(1,len(items))
+    step=max(1,len(items)//40)
+
+    emit("V18数据预处理", 0.00, f"准备处理 {len(items)} 只股票")
+    for i,(code,df) in enumerate(items, start=1):
         c=norm_code(code)
         if eligible_code(c):
             stocks[c]=prepare_stock(df,c)
+        if i==len(items) or i%step==0:
+            emit("V18数据预处理", 0.18*(i/total), f"已预处理 {i}/{len(items)} 只股票")
 
+    emit("构建市场横截面", 0.20, f"策略有效股票 {len(stocks)} 只")
     market=build_market_context(stocks)
+    emit("构建市场横截面", 0.23, "q40 / above20 / mom20 已完成")
 
+    emit("Engine A", 0.24, "正在扫描 A 结构")
     a,peer_pool=scan_a_final(stocks,market,p)
-    b=scan_b_final(stocks,market,p)
-    c=scan_c_final(stocks,market,p)
+    emit("Engine A", 0.48, f"A 完成：{len(a)} 条；peer pool {len(peer_pool)}")
 
+    emit("Engine B", 0.50, "正在扫描 B 结构")
+    b=scan_b_final(stocks,market,p)
+    emit("Engine B", 0.66, f"B 完成：{len(b)} 条")
+
+    emit("Engine C", 0.68, "正在扫描 C 结构")
+    c=scan_c_final(stocks,market,p)
+    emit("Engine C", 0.82, f"C 完成：{len(c)} 条")
+
+    emit("风险与组合", 0.84, "计算 H / fail price / target weight")
     a=attach_a_risk(a,stocks)
     b=attach_b_risk(b,stocks)
     c=attach_c_risk(c,stocks)
 
     sig=combine_abc(a,b,c)
     sig=enrich_close_entry(sig,p)
+    emit("风险与组合", 0.88, f"Combined {len(sig)} 条")
 
     if run_exits and len(sig):
         exit_idx=[];exit_ret=[];exit_reason=[]
-        for r in sig.itertuples(index=False):
+        n=len(sig)
+        exit_step=max(1,n//20)
+        emit("退出生命周期", 0.89, f"准备计算 {n} 条信号退出")
+        for i,r in enumerate(sig.itertuples(index=False), start=1):
             df=stocks[norm_code(r.code)]
             if r.engine=="A":
                 ex=exit_a(r,df,p)
@@ -1062,15 +1096,20 @@ def run_close_reference(
             else:
                 ex=exit_c(r,df,p)
             exit_idx.append(ex[0]);exit_ret.append(ex[1]);exit_reason.append(ex[2])
+            if i==n or i%exit_step==0:
+                emit("退出生命周期", 0.89 + 0.09*(i/n), f"已处理 {i}/{n} 条信号")
 
         sig["exit_idx"]=exit_idx
         sig["exit_ret"]=exit_ret
         sig["exit_reason"]=exit_reason
+    else:
+        emit("退出生命周期", 0.98, "无退出生命周期需要计算")
 
     diag=dict(
         A=len(a), B_before_precedence=len(b), C_before_precedence=len(c),
         combined=len(sig), peer_pool=len(peer_pool)
     )
+    emit("V18引擎完成", 1.00, f"A={len(a)} B={len(b)} C={len(c)} Combined={len(sig)}")
     return sig,diag
 
 

@@ -1,12 +1,135 @@
 {% extends "base.html" %}
-{% block title %}复现校验{% endblock %}
+{% block title %}V18扫描{% endblock %}
 {% block content %}
-<div class="section-head"><div><span class="eyebrow">GOLDEN REGRESSION</span><h1>V18 逐笔复现</h1><p>通过标准不是“收益差不多”，而是 A78 / B61 / C59 / Combined198 且 Missing=0、Extra=0。</p></div></div>
+
+<div class="section-head">
+  <div>
+    <span class="eyebrow">V18 FULL MARKET SCAN</span>
+    <h1>V18 全市场扫描</h1>
+    <p>扫描在后台执行，本页每 2 秒读取一次轻量进度。进度只在真实计算阶段推进，不使用“假滚动百分比”。</p>
+  </div>
+</div>
 
 {% if ready and not ready.scan_ready %}
-<section class="note"><b>当前禁止正式扫描：</b><span class="warn-text">{{ ready.scan_block_reason }}</span><br>这是数据完整性保护，不是策略失败。</section>
+<section class="note">
+  <b>当前禁止正式扫描：</b><span class="warn-text">{{ ready.scan_block_reason }}</span><br>
+  这是数据完整性保护，不是策略失败。
+</section>
 {% endif %}
 
-{% if run %}<div class="metrics"><div><span>A</span><b>{{run.a_count}}</b></div><div><span>B</span><b>{{run.b_count}}</b></div><div><span>C</span><b>{{run.c_count}}</b></div><div><span>合计</span><b>{{run.combined_count}}</b></div><div><span>Matched</span><b>{{run.golden_matched if run.golden_matched is not none else '-'}}</b></div><div><span>Missing</span><b class="{{'ok' if run.golden_missing==0 else 'neg'}}">{{run.golden_missing if run.golden_missing is not none else '-'}}</b></div><div><span>Extra</span><b class="{{'ok' if run.golden_extra==0 else 'neg'}}">{{run.golden_extra if run.golden_extra is not none else '-'}}</b></div></div><pre>{{run.message}}</pre>{% else %}<div class="empty">尚未运行完整扫描。</div>{% endif %}
-<form method="post" action="/admin/scan"><button class="danger-btn" {% if ready and not ready.scan_ready %}disabled title="历史数据完整性门尚未通过"{% endif %}>运行完整V18扫描（全市场可能耗时）</button></form>
+<section class="panel">
+  <div class="section-head">
+    <div><span class="eyebrow">SCAN PROGRESS</span><h2 id="scan-stage">{{ progress.stage if progress.exists else '等待开始' }}</h2></div>
+    <div><b id="scan-percent" style="font-size:30px" class="{{ 'ok' if progress.status == 'ok' else '' }}">{{ '{:.0f}%'.format(progress.percent) if progress.exists else '0%' }}</b></div>
+  </div>
+
+  <div style="height:16px;background:rgba(255,255,255,.08);border-radius:999px;overflow:hidden;margin:8px 0 14px">
+    <div id="scan-bar" style="height:100%;width:{{ progress.percent if progress.exists else 0 }}%;background:linear-gradient(90deg,#2a6fa6,#4ce0a1);border-radius:999px;transition:width .35s ease"></div>
+  </div>
+
+  <div class="metrics">
+    <div><span>状态</span><b id="scan-status">{{ progress.status if progress.exists else 'none' }}</b></div>
+    <div><span>数据日期</span><b id="scan-date">{{ progress.data_date or '-' }}</b></div>
+    <div><span>已耗时</span><b id="scan-elapsed">{{ progress.elapsed_seconds if progress.exists else 0 }}s</b></div>
+    <div><span>任务ID</span><b id="scan-id">{{ progress.id if progress.exists and progress.id else '-' }}</b></div>
+  </div>
+
+  <section class="note" style="margin-top:14px">
+    <b>当前动作：</b><span id="scan-detail">{{ progress.detail or '等待扫描' }}</span>
+  </section>
+
+  <p class="muted">
+    A/B/C 核心扫描保持 canonical 单体函数，所以百分比会在真实阶段边界推进，不伪造逐股进度。
+    “已耗时”会持续增长。可以离开本页，稍后回来继续查看；不要重复点击扫描。
+  </p>
+</section>
+
+<form method="post" action="/admin/scan">
+  <button id="scan-button" class="danger-btn"
+    {% if (ready and not ready.scan_ready) or scan_busy or data_busy %}disabled{% endif %}>
+    {% if scan_busy %}V18扫描运行中{% elif data_busy %}数据任务运行中{% else %}运行完整V18扫描{% endif %}
+  </button>
+</form>
+
+{% if run and run.status != 'running' %}
+<section style="margin-top:22px">
+  <div class="section-head"><div><span class="eyebrow">LAST RESULT</span><h2>最近一次扫描结果</h2></div></div>
+  <div class="metrics">
+    <div><span>A</span><b>{{ run.a_count }}</b></div>
+    <div><span>B</span><b>{{ run.b_count }}</b></div>
+    <div><span>C</span><b>{{ run.c_count }}</b></div>
+    <div><span>合计</span><b>{{ run.combined_count }}</b></div>
+    <div><span>Matched</span><b>{{ run.golden_matched if run.golden_matched is not none else '-' }}</b></div>
+    <div><span>Missing</span><b class="{{ 'ok' if run.golden_missing == 0 else 'neg' }}">{{ run.golden_missing if run.golden_missing is not none else '-' }}</b></div>
+    <div><span>Extra</span><b class="{{ 'ok' if run.golden_extra == 0 else 'neg' }}">{{ run.golden_extra if run.golden_extra is not none else '-' }}</b></div>
+  </div>
+  {% if run.message %}<pre>{{ run.message }}</pre>{% endif %}
+  {% if run.golden_matched is none %}
+  <section class="note">
+    当前数据库历史起点晚于完整 Golden 研究窗口时，Matched / Missing / Extra 会显示 “-”；
+    这不会影响基于当前滚动历史窗口的实盘候选扫描。
+  </section>
+  {% endif %}
+</section>
+{% endif %}
+
+<script>
+(() => {
+  const POLL_MS = 2000;
+  let timer = null;
+  let previousStatus = "{{ progress.status if progress.exists else 'none' }}";
+  const el = id => document.getElementById(id);
+
+  function fmtElapsed(sec) {
+    sec = Math.max(0, Number(sec || 0));
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (h > 0) return `${h}h ${m}m ${s}s`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+
+  function apply(p) {
+    const pct = Math.max(0, Math.min(100, Number(p.percent || 0)));
+    if (el('scan-stage')) el('scan-stage').textContent = p.stage || '-';
+    if (el('scan-percent')) {
+      el('scan-percent').textContent = `${pct.toFixed(0)}%`;
+      el('scan-percent').className = p.status === 'ok' ? 'ok' : '';
+    }
+    if (el('scan-bar')) el('scan-bar').style.width = `${pct}%`;
+    if (el('scan-status')) el('scan-status').textContent = p.status || '-';
+    if (el('scan-date')) el('scan-date').textContent = p.data_date || '-';
+    if (el('scan-elapsed')) el('scan-elapsed').textContent = fmtElapsed(p.elapsed_seconds);
+    if (el('scan-id')) el('scan-id').textContent = p.id || '-';
+    if (el('scan-detail')) el('scan-detail').textContent = p.detail || '-';
+
+    const btn = el('scan-button');
+    if (btn) {
+      btn.disabled = !!p.scan_busy || !!p.data_busy;
+      btn.textContent = p.scan_busy ? 'V18扫描运行中' : (p.data_busy ? '数据任务运行中' : '运行完整V18扫描');
+    }
+
+    if (previousStatus === 'running' && ['ok','error','blocked','interrupted'].includes(p.status)) {
+      clearTimeout(timer);
+      setTimeout(() => window.location.reload(), 900);
+      return;
+    }
+    previousStatus = p.status;
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch('/api/scan/progress', {cache:'no-store', headers:{Accept:'application/json'}});
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      apply(await res.json());
+    } catch (e) {
+      if (el('scan-detail')) el('scan-detail').textContent = '进度连接暂时失败，正在重试；后台扫描不会因此停止。';
+    }
+    timer = setTimeout(poll, POLL_MS);
+  }
+  poll();
+})();
+</script>
+
 {% endblock %}

@@ -15,7 +15,9 @@ from .db import init_db, db_session, SessionLocal
 from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock, LatestDayAudit
 from .auth import valid_password, make_cookie, is_logged_in, COOKIE
 from .services.repository import latest_trade_date, latest_prices
-from .services.strategy_service import run_full_scan
+from .services.strategy_service import (
+    run_full_scan, scan_progress_payload, recover_interrupted_scans,
+)
 from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.chart_service import build_stock_chart
 from .services.data_update import (
@@ -99,6 +101,20 @@ def _data_job_busy(db) -> bool:
     return bool(db.execute(
         select(func.count(DataUpdateRun.id)).where(DataUpdateRun.status == "running")
     ).scalar_one() or 0)
+
+
+def _scan_job_busy(db) -> bool:
+    return bool(db.execute(
+        select(func.count(ScanRun.id)).where(ScanRun.status == "running")
+    ).scalar_one() or 0)
+
+
+def _bg_full_scan():
+    db = SessionLocal()
+    try:
+        run_full_scan(db)
+    finally:
+        db.close()
 
 
 def _bg_daily_and_scan():
@@ -296,6 +312,7 @@ def startup():
     db = SessionLocal()
     try:
         recover_interrupted_runs(db)
+        recover_interrupted_scans(db)
     finally:
         db.close()
 
@@ -631,14 +648,41 @@ def admin_daily_update(background_tasks: BackgroundTasks):
     return RedirectResponse("/data", 303)
 
 
+@app.get("/api/scan/progress")
+def scan_progress(db=Depends(db_session)):
+    run = db.execute(
+        select(ScanRun).order_by(ScanRun.id.desc()).limit(1)
+    ).scalar_one_or_none()
+    payload = scan_progress_payload(run)
+    payload["scan_busy"] = _scan_job_busy(db)
+    payload["data_busy"] = _data_job_busy(db)
+    return payload
+
+
 @app.get("/validation", response_class=HTMLResponse)
 def validation(request: Request, db=Depends(db_session)):
-    run = db.execute(select(ScanRun).order_by(ScanRun.id.desc()).limit(1)).scalar_one_or_none()
+    run = db.execute(
+        select(ScanRun).order_by(ScanRun.id.desc()).limit(1)
+    ).scalar_one_or_none()
     ready = scan_readiness(db, check_calendar=True)
-    return templates.TemplateResponse("validation.html", {"request": request, "run": run, "ready": ready})
+    progress = scan_progress_payload(run)
+    return templates.TemplateResponse("validation.html", {
+        "request": request, "run": run, "ready": ready,
+        "progress": progress,
+        "scan_busy": _scan_job_busy(db),
+        "data_busy": _data_job_busy(db),
+    })
 
 
 @app.post("/admin/scan")
-def admin_scan(db=Depends(db_session)):
-    run_full_scan(db)
+def admin_scan(
+    background_tasks: BackgroundTasks,
+    db=Depends(db_session),
+):
+    if _scan_job_busy(db) or _data_job_busy(db):
+        return RedirectResponse("/validation", 303)
+    ready = scan_readiness(db, check_calendar=True)
+    if not ready["scan_ready"]:
+        return RedirectResponse("/validation", 303)
+    background_tasks.add_task(_bg_full_scan)
     return RedirectResponse("/validation", 303)
