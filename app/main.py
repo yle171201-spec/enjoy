@@ -495,17 +495,38 @@ def screener(
     ).scalars().all()
     cutoff = min(days) if days else date.today() - timedelta(days=n * 2)
     latest_day = latest_trade_date(db)
+    full_scan_day = db.execute(
+        select(func.max(ScanRun.data_date)).where(ScanRun.status == "ok")
+    ).scalar_one_or_none()
+    live_scan_day = db.execute(
+        select(func.max(LiveScanRun.data_date)).where(LiveScanRun.status == "ok")
+    ).scalar_one_or_none()
+
+    # V2.3.3: continuous screener history = canonical V18 + incremental V18-LIVE.
     q = (
         select(Signal, Stock)
         .join(Stock, Stock.code == Signal.code, isouter=True)
         .where(
-            Signal.strategy_version == settings.live_strategy_version,
+            Signal.strategy_version.in_(
+                (settings.strategy_version, settings.live_strategy_version)
+            ),
             Signal.signal_date >= cutoff,
         )
     )
     if engine != "ALL":
         q = q.where(Signal.engine.in_(tuple(engine.replace("+", ""))))
-    rows = db.execute(q.order_by(Signal.signal_date.desc(), Signal.engine)).all()
+
+    rows = db.execute(q).all()
+
+    # Newest signal wins per stock. On the same date, prefer the LIVE slice.
+    rows.sort(
+        key=lambda pair: (
+            pair[0].signal_date,
+            1 if pair[0].strategy_version == settings.live_strategy_version else 0,
+            float(pair[0].target_weight or 0.0),
+        ),
+        reverse=True,
+    )
     latest = {}
     for s, st in rows:
         latest.setdefault(s.code, (s, st))
@@ -530,6 +551,7 @@ def screener(
     return templates.TemplateResponse("screener.html", {
         "request": request, "rows": final_rows, "n": n, "engine": engine,
         "cutoff": cutoff, "latest_day": latest_day,
+        "full_scan_day": full_scan_day, "live_scan_day": live_scan_day,
     })
 
 

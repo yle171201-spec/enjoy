@@ -7,7 +7,8 @@
   <label>发动机<select name="engine">{% for x in ['ALL','A','B','C','A+B','A+C','B+C'] %}<option {% if engine==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label>
   <button>筛选</button>
 </form>
-<p class="muted">窗口起点约 {{cutoff}} ｜ 最新数据 {{latest_day or '-'}}</p>
+<p class="muted">窗口起点约 {{cutoff}} ｜ 数据最新交易日 {{latest_day or '-'}} ｜ 完整V18扫描日 {{full_scan_day or '-'}} ｜ Live扫描日 {{live_scan_day or '-'}}</p>
+<p class="muted">信号源：V18历史 + V18-LIVE每日增量；同日重复时优先 Live。</p>
 <div class="table-wrap">
 <table>
 <thead><tr><th>股票</th><th>最近买点</th><th>距今</th><th>类型</th><th>信号价</th><th>当前价</th><th>至今</th><th>失效价</th><th>预估仓位</th><th>生命周期</th></tr></thead>
