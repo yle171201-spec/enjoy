@@ -35,7 +35,7 @@ class Settings:
     calendar_gap_check_days: int = int(_env("CALENDAR_GAP_CHECK_DAYS", "420"))
     default_n_days: int = int(_env("DEFAULT_N_DAYS", "20"))
     slippage_bps: float = float(_env("SLIPPAGE_BPS", "0"))
-    web_version: str = "V2.3.5-RC4A"
+    web_version: str = "V2.3.6-AUDIT"
     strategy_version: str = "V18"
     live_strategy_version: str = "V18-LIVE"
     cookie_secure: bool = _env("COOKIE_SECURE", "0").lower() in {"1","true","yes","on"}

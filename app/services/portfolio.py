@@ -208,9 +208,13 @@ def simulate_portfolio(
                 "recovery_date": None, "max_underwater_days": 0, "accepted": 0, "rejected": 0,
                 "skipped": len(skipped), "full_rejections": 0, "duplicate_rejections": 0,
                 "c_cap_rejections": 0, "c_replacements": 0, "accepted_A": 0, "accepted_B": 0,
-                "accepted_C": 0, "calmar_like": 0.0
+                "accepted_C": 0, "rc4_enabled": bool(p.rc4_enabled and execution.mode == "next_open"),
+                "rc4_tail_created": 0, "rc4_tail_technical_exits": 0,
+                "rc4_tail_capacity_yields": 0, "rc4_tail_open_at_end": 0,
+                "calmar_like": 0.0
             },
-            "equity": [], "yearly": [], "trades": [], "rejections": [], "skipped_detail": []
+            "equity": [], "yearly": [], "trades": [], "runner_audit": [],
+            "realized": [], "rejections": [], "skipped_detail": []
         }
 
     codes = {t.code for t in valid}
@@ -535,11 +539,45 @@ def simulate_portfolio(
             "rc4_tail_exit_date": runner_info[tid].get("tail_exit_date"),
         })
 
+    runner_audit = []
+    for tid in accepted:
+        info = runner_info.get(tid, {})
+        if not (rc4_active and info.get("eligible")):
+            continue
+        t = valid[tid]
+        rr = [x for x in realized_rows if x.get("tid") == tid]
+        core = next((x for x in rr if x.get("kind") == "CORE85"), None)
+        tail = next((x for x in rr if x.get("kind") == "TAIL"), None)
+
+        base_px = float(core["exit_price"]) if core else np.nan
+        tail_px = float(tail["exit_price"]) if tail else np.nan
+        tail_leg_return = (
+            tail_px / base_px - 1
+            if np.isfinite(base_px) and base_px > 0 and np.isfinite(tail_px)
+            else np.nan
+        )
+        runner_audit.append({
+            "code": t.code,
+            "signal_date": t.signal_date,
+            "decision_date": t.exit_date,
+            "base_exit_date": planned_exit.get(tid),
+            "base_exit_price": base_px,
+            "original_exit_reason": t.exit_reason,
+            "proof_h": info.get("proof_h"),
+            "ret5": info.get("ret5"),
+            "tail_exit_date": tail.get("exit_date") if tail else None,
+            "tail_exit_price": tail_px,
+            "tail_exit_reason": tail.get("reason") if tail else "OPEN_AT_SAMPLE_END",
+            "planned_technical_exit": info.get("tail_exit_date"),
+            "tail_leg_return": tail_leg_return,
+        })
+
     return {
         "metrics": metrics,
         "equity": eqdf.to_dict("records"),
         "yearly": _yearly(eqdf),
         "trades": accepted_rows,
+        "runner_audit": runner_audit,
         "realized": realized_rows,
         "rejections": rejection_rows,
         "skipped_detail": [

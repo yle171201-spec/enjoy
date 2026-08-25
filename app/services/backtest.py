@@ -169,6 +169,7 @@ def portfolio_backtest(
     max_c: int = 1,
     monte_carlo_seeds: int = 0,
     seed: int = 20260819,
+    rc4_enabled: bool = True,
 ) -> dict:
     sigs = _signals_query(db, engines, start, end)
     frames = load_frames_for_codes(db, [s.code for s in sigs])
@@ -181,6 +182,7 @@ def portfolio_backtest(
     pp = PortfolioParams(
         max_positions=k, max_c_positions=max_c, c_yields_to_ab=c_yields_to_ab,
         random_seed=seed, commission_bps=commission_bps, stamp_tax_bps=stamp_tax_bps,
+        rc4_enabled=rc4_enabled,
     )
     result = simulate_portfolio(trades, frames, ep, pp)
     if monte_carlo_seeds > 0:
@@ -188,3 +190,66 @@ def portfolio_backtest(
     else:
         result["monte_carlo"] = None
     return result
+
+
+def compare_portfolio_results(rc4: dict, baseline: dict) -> dict:
+    """Same-input audit comparison. Baseline terminal NAV is carried flat to RC4's later end."""
+    rm = rc4.get("metrics", {})
+    bm = baseline.get("metrics", {})
+    req = rc4.get("equity", []) or []
+    beq = baseline.get("equity", []) or []
+
+    r_start = req[0]["date"] if req else None
+    b_start = beq[0]["date"] if beq else None
+    r_end = req[-1]["date"] if req else None
+    b_end = beq[-1]["date"] if beq else None
+
+    common_end = max([x for x in (r_end, b_end) if x is not None], default=None)
+    same_start = bool(r_start is not None and b_start is not None and r_start == b_start)
+    common_start = r_start if same_start else None
+
+    rc4_cagr_aligned = rm.get("cagr")
+    baseline_cagr_aligned = bm.get("cagr")
+    if same_start and common_end is not None:
+        days = (common_end - common_start).days
+        years = days / 365.25
+        if years > 0:
+            rt = float(rm.get("terminal", 1.0))
+            bt = float(bm.get("terminal", 1.0))
+            rc4_cagr_aligned = rt ** (1 / years) - 1 if rt > 0 else np.nan
+            baseline_cagr_aligned = bt ** (1 / years) - 1 if bt > 0 else np.nan
+
+    def f(x, default=np.nan):
+        try:
+            return float(x)
+        except Exception:
+            return default
+
+    rc4_cagr_aligned = f(rc4_cagr_aligned)
+    baseline_cagr_aligned = f(baseline_cagr_aligned)
+    r_mdd = f(rm.get("mdd"))
+    b_mdd = f(bm.get("mdd"))
+    r_terminal = f(rm.get("terminal"))
+    b_terminal = f(bm.get("terminal"))
+
+    return {
+        "same_start": same_start,
+        "start": common_start,
+        "common_end": common_end,
+        "baseline_end": b_end,
+        "rc4_end": r_end,
+        "baseline_cagr": baseline_cagr_aligned,
+        "rc4_cagr": rc4_cagr_aligned,
+        "cagr_delta": rc4_cagr_aligned - baseline_cagr_aligned,
+        "baseline_mdd": b_mdd,
+        "rc4_mdd": r_mdd,
+        "mdd_delta": r_mdd - b_mdd,
+        "baseline_terminal": b_terminal,
+        "rc4_terminal": r_terminal,
+        "terminal_delta": r_terminal - b_terminal,
+        "baseline_accepted": int(bm.get("accepted", 0) or 0),
+        "rc4_accepted": int(rm.get("accepted", 0) or 0),
+        "accepted_delta": int(rm.get("accepted", 0) or 0) - int(bm.get("accepted", 0) or 0),
+        "tail_created": int(rm.get("rc4_tail_created", 0) or 0),
+    }
+

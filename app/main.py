@@ -22,7 +22,7 @@ from .services.live_scan import (
     run_live_scan, live_progress_payload, live_state_status,
     recover_interrupted_live_scans,
 )
-from .services.backtest import close_vs_next_open, portfolio_backtest
+from .services.backtest import close_vs_next_open, portfolio_backtest, compare_portfolio_results
 from .services.rc4_final import rc4_status
 from .services.chart_service import build_stock_chart
 from .services.review_service import (
@@ -655,19 +655,28 @@ def portfolio_run(
 ):
     sd = date.fromisoformat(start) if start else None
     ed = date.fromisoformat(end) if end else None
-    result = portfolio_backtest(
-        db, tuple(engines), execution, sd, ed, k,
-        ab_risk / 100.0, c_risk / 100.0, max_weight / 100.0,
-        slippage_bps, commission_bps, stamp_tax_bps,
-        True, 1, monte_carlo_seeds,
+    common = dict(
+        db=db, engines=tuple(engines), execution=execution, start=sd, end=ed, k=k,
+        ab_risk=ab_risk / 100.0, c_risk=c_risk / 100.0,
+        max_weight=max_weight / 100.0,
+        slippage_bps=slippage_bps, commission_bps=commission_bps,
+        stamp_tax_bps=stamp_tax_bps, c_yields_to_ab=True, max_c=1,
     )
+    result = portfolio_backtest(
+        **common, monte_carlo_seeds=monte_carlo_seeds, rc4_enabled=True,
+    )
+    baseline = portfolio_backtest(
+        **common, monte_carlo_seeds=0, rc4_enabled=False,
+    )
+    comparison = compare_portfolio_results(result, baseline)
     chart = json.dumps({
         "dates": [str(x["date"]) for x in result.get("equity", [])],
         "equity": [x["equity"] for x in result.get("equity", [])],
         "positions": [x["positions"] for x in result.get("equity", [])],
     }, ensure_ascii=False)
     return templates.TemplateResponse("portfolio.html", {
-        "request": request, "result": result, "chart_json": chart,
+        "request": request, "result": result, "baseline": baseline,
+        "comparison": comparison, "chart_json": chart,
         "engines": engines, "execution": execution, "k": k, "ab_risk": ab_risk,
         "c_risk": c_risk, "max_weight": max_weight, "start": start, "end": end,
         "slippage_bps": slippage_bps, "commission_bps": commission_bps,
