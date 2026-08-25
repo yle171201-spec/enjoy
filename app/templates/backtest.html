@@ -2,7 +2,7 @@
 {% block title %}执行回测{% endblock %}
 {% block content %}
 <div class="section-head"><div><span class="eyebrow">EXECUTION INTEGRITY · {{web_version or 'V2.3.8'}}</span><h1>Close vs 次日开盘动态回测</h1><p>生产信号流 = V18完整历史 + V18-LIVE每日增量。NEXT_OPEN 严格按“收盘确认 → 下一交易日开盘买入/卖出”。</p></div></div>
-<form class="toolbar" method="post">
+<form class="toolbar" method="post" data-progress="正在运行执行回测">
 <label>发动机<select name="engines">{% for x in ['ABC','AB','AC','BC','A','B','C'] %}<option {% if engines==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label>
 <label>开始<input type="date" name="start" min="2025-01-01" value="{{start or '2025-01-01'}}"></label><label>结束<input type="date" name="end" value="{{end or ''}}"></label>
 <label>开盘买入滑点 bps<input type="number" name="slippage_bps" value="{{slippage_bps or 0}}" step="1"></label>

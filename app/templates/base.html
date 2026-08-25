@@ -1,3 +1,33 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#07101d"><title>{% block title %}A股ABC{% endblock %}</title><link rel="stylesheet" href="/static/app.css"><script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script><script src="/static/app.js"></script></head><body>
-<header><a class="brand" href="/">ABC 日线交易系统 <small>FINAL</small></a><nav><a href="/">今日操作</a><a href="/positions">我的持仓</a><a href="/screener">历史信号</a><a href="/portfolio">账户回测</a><a href="/data">数据中心</a><a href="/review">策略复盘</a><a href="/logout">退出</a></nav></header>
-<main>{% block content %}{% endblock %}</main><footer>正式策略：V18 + RC4A ｜ 收盘确认 → 下一交易日开盘 ｜ K6；A/B风险2.5%；C风险1.5%；单股上限20%。</footer></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07101d">
+  <title>{% block title %}A股ABC{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  {% block head_extra %}{% endblock %}
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">ABC 日线交易系统 <small>FINAL</small></a>
+  <nav>
+    <a href="/">今日操作</a><a href="/positions">我的持仓</a>
+    <a href="/screener">历史信号</a><a href="/portfolio">账户回测</a>
+    <a href="/data">数据中心</a><a href="/review">策略复盘</a>
+    <a href="/logout">退出</a>
+  </nav>
+</header>
+<main>{% block content %}{% endblock %}</main>
+<footer>正式策略：V18 + RC4A ｜ 收盘确认 → 下一交易日开盘 ｜ K6；A/B风险2.5%；C风险1.5%；单股上限20%。</footer>
+
+<div id="page-progress" class="page-progress" hidden>
+  <div class="page-progress-card">
+    <b id="page-progress-title">正在处理</b>
+    <div class="job-track"><i id="page-progress-bar" style="width:8%"></i></div>
+    <span id="page-progress-time" class="muted">已等待 0 秒</span>
+  </div>
+</div>
+</body>
+</html>

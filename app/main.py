@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 import json
+import time as _time
 
 from fastapi import FastAPI, Request, Depends, Form, Query, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.gzip import GZipMiddleware
 from sqlalchemy import select, func, distinct, text
 
 from .config import settings
@@ -33,9 +35,14 @@ from .services.data_update import (
     data_stats, bootstrap_batch, sync_daily_public, scan_readiness,
     recover_interrupted_runs, repair_latest_gaps, audit_latest_day,
 )
+from .services.maintenance_service import (
+    run_smart_maintenance, smart_progress_snapshot, smart_active,
+    ensure_runtime_indexes,
+)
 
 BASE = Path(__file__).resolve().parent
 app = FastAPI(title=settings.app_name, version=settings.web_version)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 app.mount("/static", StaticFiles(directory=BASE / "static"), name="static")
 templates = Jinja2Templates(directory=BASE / "templates")
 
@@ -65,76 +72,12 @@ def _bg_latest_audit(limit: int, retry_errors: bool = False):
 
 
 def _bg_smart_update():
-    db = SessionLocal()
-    try:
-        stats = data_stats(db)
-        if float(stats.get("bootstrap_coverage") or 0.0) < 0.9999:
-            retry_errors = bool(
-                int(stats.get("bootstrap_errors") or 0) > 0
-                and int(stats.get("bootstrap_done") or 0)
-                + int(stats.get("bootstrap_errors") or 0)
-                >= int(stats.get("strategy_pool") or 0)
-            )
-            bootstrap_batch(
-                db,
-                limit=max(100, int(settings.bootstrap_batch_size)),
-                retry_errors=retry_errors,
-            )
-            return
-
-        ready = scan_readiness(db, check_calendar=True)
-
-        if ready.get("scan_ready"):
-            latest = ready.get("latest")
-            done = db.execute(
-                select(LiveScanRun).where(
-                    LiveScanRun.status == "ok",
-                    LiveScanRun.data_date == latest,
-                ).order_by(LiveScanRun.id.desc()).limit(1)
-            ).scalar_one_or_none() if latest else None
-            if latest and done is None:
-                run_live_scan(db)
-            return
-
-        if ready.get("stale"):
-            try:
-                sync_daily_public(db)
-            except Exception:
-                pass
-            ready = scan_readiness(db, check_calendar=True)
-            if ready.get("scan_ready"):
-                run_live_scan(db)
-                return
-
-        if ready.get("stale") or not ready.get("latest_coverage_ok"):
-            for _ in range(3):
-                repair_latest_gaps(
-                    db,
-                    limit=max(100, int(settings.gap_repair_batch_size)),
-                    retry_errors=False,
-                )
-                ready = scan_readiness(db, check_calendar=True)
-                if ready.get("latest_coverage_ok") or ready.get("scan_ready"):
-                    break
-            if ready.get("scan_ready"):
-                run_live_scan(db)
-                return
-
-        if (not ready.get("latest_verified_ok")) or int(ready.get("latest_unresolved") or 0) > 0:
-            audit_latest_day(
-                db,
-                limit=max(100, int(settings.latest_audit_batch_size)),
-                retry_errors=False,
-            )
-            ready = scan_readiness(db, check_calendar=True)
-
-        if ready.get("scan_ready"):
-            run_live_scan(db)
-    finally:
-        db.close()
+    run_smart_maintenance()
 
 
 def _data_job_busy(db) -> bool:
+    if smart_active():
+        return True
     return bool(db.execute(
         select(func.count(DataUpdateRun.id)).where(DataUpdateRun.status == "running")
     ).scalar_one() or 0)
@@ -271,12 +214,13 @@ def _live_data_progress(db, target: date | None = None, full: bool = False) -> d
         "update": update_payload, "data_busy": data_busy,
         "scan_busy": scan_busy, "live_busy": live_busy,
         "job_busy": bool(data_busy or scan_busy or live_busy),
+        "smart": smart_progress_snapshot(),
     }
     if not full:
         return payload
 
     stocks = int(db.execute(select(func.count(Stock.code))).scalar_one() or 0)
-    bars = int(db.execute(select(func.count(DailyBar.id))).scalar_one() or 0)
+    bars = 0
     pool = int(db.execute(
         select(func.count(Stock.code)).where(Stock.is_st.is_(False))
     ).scalar_one() or 0)
@@ -364,6 +308,7 @@ def startup():
     init_db()
     db = SessionLocal()
     try:
+        ensure_runtime_indexes(db)
         recover_interrupted_runs(db)
         recover_interrupted_scans(db)
         recover_interrupted_live_scans(db)
@@ -376,7 +321,10 @@ async def auth_middleware(request, call_next):
     public = {"/login", "/health"}
     if request.url.path not in public and not request.url.path.startswith("/static") and not is_logged_in(request):
         return RedirectResponse("/login", 303)
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "public, max-age=3600"
+    return response
 
 
 @app.get("/health")
@@ -524,24 +472,36 @@ def screener(
     view: str = Query("latest"),
     db=Depends(db_session),
 ):
+    t0 = _time.perf_counter()
     view = view if view in {"latest", "events"} else "latest"
+
     days = db.execute(
-        select(distinct(DailyBar.trade_date)).order_by(DailyBar.trade_date.desc()).limit(n)
+        select(distinct(DailyBar.trade_date))
+        .order_by(DailyBar.trade_date.desc())
+        .limit(n)
     ).scalars().all()
-    cutoff = min(days) if days else date.fromisoformat(settings.bootstrap_start_date)
-    latest_day = latest_trade_date(db)
+    cutoff = min(days) if days else date.fromisoformat(
+        settings.bootstrap_start_date
+    )
+    latest_day = days[0] if days else latest_trade_date(db)
+    age_by_day = {d: i for i, d in enumerate(days)}
+
     full_scan_day = db.execute(
         select(func.max(ScanRun.data_date)).where(ScanRun.status == "ok")
     ).scalar_one_or_none()
     live_scan_day = db.execute(
-        select(func.max(LiveScanRun.data_date)).where(LiveScanRun.status == "ok")
+        select(func.max(LiveScanRun.data_date)).where(
+            LiveScanRun.status == "ok"
+        )
     ).scalar_one_or_none()
 
     q = (
         select(Signal, Stock)
         .join(Stock, Stock.code == Signal.code, isouter=True)
         .where(
-            Signal.strategy_version.in_((settings.strategy_version, settings.live_strategy_version)),
+            Signal.strategy_version.in_(
+                (settings.strategy_version, settings.live_strategy_version)
+            ),
             Signal.signal_date >= cutoff,
         )
     )
@@ -557,10 +517,13 @@ def screener(
         ),
         reverse=True,
     )
+
     logical = {}
     for s0, st0 in raw:
-        key = (str(s0.code).zfill(6), s0.signal_date, s0.engine)
-        logical.setdefault(key, (s0, st0))
+        logical.setdefault(
+            (str(s0.code).zfill(6), s0.signal_date, s0.engine),
+            (s0, st0),
+        )
     events = list(logical.values())
 
     if view == "latest":
@@ -572,40 +535,65 @@ def screener(
         selected = events
 
     prices = latest_prices(db, [s0.code for s0, _ in selected])
-    trade_days_desc = db.execute(
-        select(distinct(DailyBar.trade_date)).order_by(DailyBar.trade_date.desc())
-    ).scalars().all()
-    day_pos = {d: i for i, d in enumerate(reversed(trade_days_desc))}
 
     final_rows = []
     for s0, st0 in selected:
         px_date, px = prices.get(s0.code, (None, None))
-        ret = px / s0.signal_close - 1 if px is not None and s0.signal_close > 0 else None
-        age = (
-            day_pos.get(latest_day, 0) - day_pos.get(s0.signal_date, 0)
-            if latest_day and s0.signal_date in day_pos else None
+        ret = (
+            px / s0.signal_close - 1
+            if px is not None and s0.signal_close > 0
+            else None
         )
-        if s0.strategy_version == settings.live_strategy_version and s0.exit_date is None:
+        age = age_by_day.get(s0.signal_date)
+
+        if (
+            s0.strategy_version == settings.live_strategy_version
+            and s0.exit_date is None
+        ):
             lifecycle = "Live增量 · 待完整动态复现"
         elif s0.exit_date and latest_day and s0.exit_date <= latest_day:
             lifecycle = f"已出现退出信号 · {s0.exit_reason or '-'}"
         else:
             lifecycle = "动态生命周期中/数据末端"
+
         final_rows.append({
-            "signal": s0, "stock": st0, "current_date": px_date, "current_price": px,
-            "since_ret": ret, "age": age, "lifecycle": lifecycle,
-            "source": "V18" if s0.strategy_version == settings.strategy_version else "LIVE",
+            "signal": s0,
+            "stock": st0,
+            "current_date": px_date,
+            "current_price": px,
+            "since_ret": ret,
+            "age": age,
+            "lifecycle": lifecycle,
+            "source": (
+                "V18"
+                if s0.strategy_version == settings.strategy_version
+                else "LIVE"
+            ),
         })
 
     final_rows.sort(
-        key=lambda x: (x["signal"].signal_date, x["signal"].target_weight),
+        key=lambda x: (
+            x["signal"].signal_date,
+            x["signal"].target_weight,
+        ),
         reverse=True,
     )
-    return templates.TemplateResponse("screener.html", {
-        "request": request, "rows": final_rows, "n": n, "engine": engine, "view": view,
-        "cutoff": cutoff, "latest_day": latest_day,
-        "full_scan_day": full_scan_day, "live_scan_day": live_scan_day,
-    })
+
+    return templates.TemplateResponse(
+        "screener.html",
+        {
+            "request": request,
+            "rows": final_rows,
+            "n": n,
+            "engine": engine,
+            "view": view,
+            "cutoff": cutoff,
+            "latest_day": latest_day,
+            "full_scan_day": full_scan_day,
+            "live_scan_day": live_scan_day,
+            "load_ms": int((_time.perf_counter() - t0) * 1000),
+        },
+    )
 
 
 @app.get("/stock/{code}", response_class=HTMLResponse)
@@ -831,6 +819,7 @@ def data_page(request: Request, db=Depends(db_session)):
         "stock_timeout": settings.bootstrap_stock_timeout_seconds,
         "gap_batch_size": settings.gap_repair_batch_size,
         "audit_batch_size": settings.latest_audit_batch_size,
+        "smart": smart_progress_snapshot(),
     })
 
 

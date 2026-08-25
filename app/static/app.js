@@ -100,3 +100,43 @@ function drawEquity(id,d){
   });
   window.addEventListener('resize',()=>c.resize());
 }
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('form[data-progress]').forEach(form => {
+    form.addEventListener('submit', () => {
+      if (!form.checkValidity()) return;
+
+      const box = document.getElementById('page-progress');
+      if (!box) return;
+
+      const title = document.getElementById('page-progress-title');
+      const bar = document.getElementById('page-progress-bar');
+      const tm = document.getElementById('page-progress-time');
+
+      if (title) title.textContent = form.dataset.progress || '正在处理';
+      box.hidden = false;
+
+      let pct = 8;
+      let sec = 0;
+      if (bar) bar.style.width = pct + '%';
+
+      const timer = setInterval(() => {
+        sec += 1;
+        pct = Math.min(92, pct + (92 - pct) * 0.08);
+        if (bar) bar.style.width = pct + '%';
+        if (tm) {
+          tm.textContent = `已等待 ${sec} 秒 · 完成后自动进入结果页`;
+        }
+      }, 1000);
+
+      window.addEventListener(
+        'pageshow',
+        () => {
+          clearInterval(timer);
+          box.hidden = true;
+        },
+        {once: true},
+      );
+    });
+  });
+});

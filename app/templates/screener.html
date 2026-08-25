@@ -1,14 +1,27 @@
 {% extends "base.html" %}
 {% block title %}历史信号{% endblock %}
 {% block content %}
-<div class="section-head"><div><span class="eyebrow">PRODUCTION SIGNAL ARCHIVE</span><h1>历史信号 / N日选股</h1><p>V18完整扫描与 V18-LIVE 每日增量合并去重。既可看每股最近一次，也可保留窗口内全部正式买点。</p></div></div>
-<form class="toolbar" method="get">
+<div class="section-head">
+  <div>
+    <span class="eyebrow">PRODUCTION SIGNAL ARCHIVE</span>
+    <h1>历史信号 / N日选股</h1>
+    <p>V18完整历史与 V18-LIVE 每日增量合并去重。筛选提交后会立即显示处理进度。</p>
+  </div>
+</div>
+
+<form class="toolbar" method="get" data-progress="正在读取历史信号">
   <label>最近交易日<input name="n" type="number" min="1" max="800" value="{{n}}"></label>
   <label>发动机<select name="engine">{% for x in ['ALL','A','B','C','A+B','A+C','B+C'] %}<option {% if engine==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label>
   <label>显示<select name="view"><option value="latest" {% if view=='latest' %}selected{% endif %}>每股最近一次</option><option value="events" {% if view=='events' %}selected{% endif %}>全部历史买点</option></select></label>
-  <button>筛选</button>
+  <button>开始筛选</button>
 </form>
-<div class="note"><b>口径：</b>窗口起点 {{cutoff}} ｜ 数据库最新 {{latest_day or '-'}} ｜ 完整V18 {{full_scan_day or '-'}} ｜ Live {{live_scan_day or '-'}}。“现价/信号”不是策略兑现收益。</div>
+
+<div class="note">
+  <b>口径：</b>窗口起点 {{cutoff}} ｜ 数据库最新 {{latest_day or '-'}}
+  ｜ 完整V18 {{full_scan_day or '-'}} ｜ Live {{live_scan_day or '-'}}
+  ｜ 查询 {{load_ms}} ms ｜ {{rows|length}} 条。
+</div>
+
 <div class="table-wrap"><table>
 <thead><tr><th>股票</th><th>信号日</th><th>距今</th><th>类型</th><th>来源</th><th>信号价</th><th>当前价</th><th>现价/信号</th><th>结构失效线</th><th>预估仓位</th><th>生命周期</th><th></th></tr></thead>
 <tbody>
@@ -17,11 +30,15 @@
 <td><a href="/stock/{{s.code}}"><b>{{s.code}}</b> {{st.name if st else ''}}</a></td>
 <td>{{s.signal_date}}</td><td>{{r.age if r.age is not none else '-'}}T</td>
 <td><span class="tag tag-{{s.engine}}">{{s.engine}}</span></td><td>{{r.source}}</td>
-<td>{{'%.2f'|format(s.signal_close)}}</td><td>{{'%.2f'|format(r.current_price) if r.current_price is not none else '-'}}</td>
+<td>{{'%.2f'|format(s.signal_close)}}</td>
+<td>{{'%.2f'|format(r.current_price) if r.current_price is not none else '-'}}</td>
 <td class="{{'pos' if r.since_ret is not none and r.since_ret>0 else 'neg' if r.since_ret is not none else ''}}">{{'%.1f%%'|format(r.since_ret*100) if r.since_ret is not none else '-'}}</td>
-<td>{{'%.2f'|format(s.fail_price)}}</td><td>{{'%.1f%%'|format(s.target_weight*100)}}</td><td>{{r.lifecycle}}</td>
+<td>{{'%.2f'|format(s.fail_price)}}</td>
+<td>{{'%.1f%%'|format(s.target_weight*100)}}</td>
+<td>{{r.lifecycle}}</td>
 <td><a class="btn ghost" href="/execution?signal_id={{s.id}}">算仓位</a></td>
-</tr>{% endfor %}
+</tr>
+{% endfor %}
 </tbody></table></div>
 {% if not rows %}<div class="empty">该窗口没有正式买点。</div>{% endif %}
 {% endblock %}

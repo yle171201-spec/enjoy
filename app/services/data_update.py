@@ -255,7 +255,7 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
 
 def data_stats(db) -> dict:
     stocks = int(db.execute(select(func.count(Stock.code))).scalar_one() or 0)
-    bars = int(db.execute(select(func.count(DailyBar.id))).scalar_one() or 0)
+    bars = 0  # FAST: normal UI does not need exact full-table rows
     earliest = db.execute(select(func.min(DailyBar.trade_date))).scalar_one_or_none()
     latest = db.execute(select(func.max(DailyBar.trade_date))).scalar_one_or_none()
 

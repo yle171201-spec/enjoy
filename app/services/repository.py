@@ -268,17 +268,32 @@ def load_frames_for_codes(db, codes, start_date=None):
 
 
 def latest_prices(db, codes):
-    result = {}
-    for code in sorted({str(c).zfill(6) for c in codes}):
-        r = db.execute(
-            select(DailyBar)
-            .where(DailyBar.code == code)
-            .order_by(DailyBar.trade_date.desc())
-            .limit(1)
-        ).scalar_one_or_none()
-        if r:
-            result[code] = (r.trade_date, float(r.close))
-    return result
+    """Latest close for many codes in one SQL query."""
+    codes = sorted({str(c).zfill(6) for c in codes})
+    if not codes:
+        return {}
+
+    sub = (
+        select(
+            DailyBar.code.label("code"),
+            func.max(DailyBar.trade_date).label("mx"),
+        )
+        .where(DailyBar.code.in_(codes))
+        .group_by(DailyBar.code)
+        .subquery()
+    )
+    rows = db.execute(
+        select(DailyBar.code, DailyBar.trade_date, DailyBar.close)
+        .join(
+            sub,
+            (DailyBar.code == sub.c.code)
+            & (DailyBar.trade_date == sub.c.mx),
+        )
+    ).all()
+    return {
+        str(code).zfill(6): (trade_date, float(close))
+        for code, trade_date, close in rows
+    }
 
 
 def replace_signals(db, frame, version="V18"):

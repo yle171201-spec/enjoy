@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block title %}{{code}}{% endblock %}
+{% block head_extra %}<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>{% endblock %}
 {% block content %}
 <div class="section-head"><div><span class="eyebrow">STRUCTURE AUDIT</span><h1>{{code}} {{stock.name if stock else ''}}</h1><p>A显示老压力P/回踩区；B显示强启动与首回踩；C显示高位横盘箱体。买卖标记来自同一策略数据库。</p></div></div>
 <div id="chart" class="chart"></div>
