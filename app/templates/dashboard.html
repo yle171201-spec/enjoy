@@ -1,25 +1,32 @@
 {% extends "base.html" %}
-{% block title %}明日候选{% endblock %}
+{% block title %}今日操作{% endblock %}
 {% block content %}
 <section class="hero">
   <div>
-    <span class="eyebrow">LATEST-ONLY LIVE SCAN</span>
-    <h1>明日候选</h1>
-    <p>只展示最新完成交易日的 V18 Live 正式 A/B/C 信号。日常扫描与完整历史复现已分离；完整扫描只用于回归与 Golden 校验。</p>
+    <span class="eyebrow">DAILY TRADE COCKPIT · {{ web_version }}</span>
+    <h1>今天只看这里</h1>
+    {% if live_current %}
+      {% if signals %}
+      <p><b>{{signal_date}}</b> 收盘信号已经确认。下面就是<b>下一交易日开盘</b>的机械执行清单；不需要自己再筛股票。</p>
+      {% else %}
+      <p><b>{{latest}}</b> 日常扫描已经完成：<b>下一交易日不新增仓位。</b> 没有信号就是空仓/持有原仓，不为了每天交易而放宽规则。</p>
+      {% endif %}
+    {% else %}
+      <p>先完成最新日线更新和日常扫描。扫描未完成前，页面不会把“尚未计算”误写成“没有买点”。</p>
+    {% endif %}
   </div>
   <div class="status">
     <div>最新日线 <b>{{ latest or '暂无' }}</b></div>
-    <div>策略 <b>V18 Live / {{ web_version }}</b></div>
-    <div>日常状态 <b class="{{ 'ok' if live_current else 'warn-text' }}">{{ 'READY' if live_current else '待扫描/待初始化' }}</b></div>
-    <div>Golden <b class="{{ 'ok' if golden_status == 'PASS' else 'warn-text' }}">{{ golden_status }}</b></div>
-    {% if update %}<div>数据更新 <b>{{update.status}} {{update.success_count}}/{{update.stock_count}}</b></div>{% endif %}
+    <div>扫描状态 <b class="{{ 'ok' if live_current else 'warn-text' }}">{{ '已完成' if live_current else '待扫描' }}</b></div>
+    <div>策略 <b>V18 + RC4A</b></div>
+    <div>执行 <b>收盘确认 → 次开</b></div>
   </div>
 </section>
 
 {% if live_run and live_run.status == 'running' %}
 <section class="panel">
   <div class="section-head">
-    <div><span class="eyebrow">LIVE PROGRESS</span><h2 id="live-stage">{{ live_progress.stage }}</h2></div>
+    <div><span class="eyebrow">正在扫描</span><h2 id="live-stage">{{ live_progress.stage }}</h2></div>
     <b id="live-percent" style="font-size:28px">{{ '%.0f%%'|format(live_progress.percent) }}</b>
   </div>
   <div style="height:14px;background:rgba(255,255,255,.08);border-radius:999px;overflow:hidden">
@@ -31,55 +38,94 @@
 
 {% if not state.ready %}
 <section class="note">
-  <b class="warn-text">V2.3 日常状态尚未初始化。</b>
-  为保证 A 的 20 日 peer 与历史 q40/breadth 连续，请到“复现校验”再运行一次完整 V18 扫描。
-  这是升级后的最后一次初始化；以后每天不再需要完整扫描。
+  <b class="warn-text">日常状态尚未初始化。</b>
+  先到“研究工具 → 策略校验”完成一次初始化；之后日常只需要更新数据和扫描。
 </section>
 {% elif latest and not live_current %}
-<section class="note">
-  <b class="warn-text">{{ latest }} 数据已有，但 V18 Live 尚未完成该日扫描。</b>
-  这里不会把“尚未扫描”误显示成“0只信号”。
-  <form method="post" action="/admin/live-scan" style="margin-top:10px">
-    <button class="primary" type="submit" {% if scan_busy or data_busy or live_busy %}disabled{% endif %}>运行今日日常扫描</button>
+<section class="panel">
+  <h2>今天还差一步</h2>
+  <p>{{latest}} 日线已经有了，但策略还没扫描这一天。</p>
+  <form method="post" action="/admin/live-scan">
+    <button class="primary" type="submit" {% if scan_busy or data_busy or live_busy %}disabled{% endif %}>立即扫描，生成下一交易日操作</button>
   </form>
 </section>
 {% endif %}
 
-<div class="cards">
-  <div class="card engine-a"><b>A 主仓</b><strong>{{ counts.A if live_current else '-' }}</strong><span>老压力突破回踩</span></div>
-  <div class="card engine-b"><b>B 主仓</b><strong>{{ counts.B if live_current else '-' }}</strong><span>强启动首回踩</span></div>
-  <div class="card engine-c"><b>C 卫星</b><strong>{{ counts.C if live_current else '-' }}</strong><span>高位横强再启动</span></div>
-</div>
-
 {% if live_current and signals %}
 <section>
-  <div class="section-head"><div><span class="eyebrow">{{ signal_date }}</span><h2>明日执行清单</h2></div><a class="btn" href="/screener?n=5">看最近5日</a></div>
+  <div class="section-head">
+    <div>
+      <span class="eyebrow">{{signal_date}} CLOSE CONFIRMED</span>
+      <h2>下一交易日：买入 {{ signals|length }} 只</h2>
+      <p>页面给的是收盘价下的预估仓位。第二天开盘后输入实际成交价，系统自动重新算最终仓位；若结构已经失效则直接告诉你跳过。</p>
+    </div>
+  </div>
+
   <div class="signal-grid">
   {% for s,st in signals %}
     <article class="signal-card engine-{{s.engine|lower}}">
-      <div class="signal-top"><div><span class="tag tag-{{s.engine}}">{{s.engine}}买</span><a href="/stock/{{s.code}}"><h3>{{s.code}} {{ st.name if st else '' }}</h3></a></div><b>{{'%.1f%%'|format(s.target_weight*100)}}</b></div>
+      <div class="signal-top">
+        <div>
+          <span class="tag tag-{{s.engine}}">{{s.engine}} · 买入</span>
+          <a href="/stock/{{s.code}}"><h3>{{s.code}} {{ st.name if st else '' }}</h3></a>
+          <span class="muted">执行：下一交易日开盘</span>
+        </div>
+        <div style="text-align:right">
+          <span class="muted">预估仓位</span>
+          <b style="font-size:26px;display:block">{{'%.1f%%'|format(s.target_weight*100)}}</b>
+        </div>
+      </div>
+
       <dl>
-        <dt>信号收盘</dt><dd>{{'%.2f'|format(s.signal_close)}}</dd>
-        <dt>结构失效</dt><dd>{{'%.2f'|format(s.fail_price)}}</dd>
-        <dt>结构风险</dt><dd>{{'%.1f%%'|format(s.risk_pct*100)}}</dd>
-        <dt>定位</dt><dd>{{'卫星仓' if s.engine=='C' else '主仓'}}</dd>
+        <dt>信号日收盘</dt><dd>{{'%.2f'|format(s.signal_close)}}</dd>
+        <dt>入场风险线</dt><dd class="neg">{{'%.2f'|format(s.fail_price)}}</dd>
+        <dt>单股结构风险</dt><dd>{{'%.1f%%'|format(s.risk_pct*100)}}</dd>
+        <dt>账户计划风险</dt><dd>{{'%.2f%%'|format(s.target_weight*s.risk_pct*100)}}</dd>
+        <dt>固定止盈价</dt><dd>不设</dd>
+        <dt>卖出方式</dt><dd>日线动态触发 → 次开</dd>
       </dl>
-      <div class="actions"><a class="btn primary" href="/execution?signal_id={{s.id}}">输入次日成交价</a><a class="btn ghost" href="/stock/{{s.code}}">看结构图</a></div>
+
+      <div class="note" style="margin-top:12px">
+        {% if s.engine == 'A' %}
+          <b>A卖出：</b>先按A原动态退出；若成熟度≥3H且卖出决策日R5≤-8%，次开兑现85%，保留15% RC4尾仓。
+        {% elif s.engine == 'B' %}
+          <b>B卖出：</b>未证明阶段重点看失效线；1.5H证明后按结构回吐退出。系统每天自动判断，不手工猜顶部。
+        {% else %}
+          <b>C卖出：</b>未证明阶段重点看失效线；达到1H后以MA20破坏等动态条件退出。C为卫星仓。
+        {% endif %}
+      </div>
+
+      <div class="actions">
+        <a class="btn primary" href="/execution?signal_id={{s.id}}">开盘后输入成交价 → 算最终仓位</a>
+        <a class="btn ghost" href="/stock/{{s.code}}">看K线结构</a>
+      </div>
     </article>
   {% endfor %}
   </div>
 </section>
 {% elif live_current %}
-<div class="empty"><b>{{latest or '当前'}} V18 Live 没有正式 A/B/C 新买点。</b><span>这是扫描完成后的真实 0，不为了每天有票而放宽策略。</span></div>
+<section class="panel">
+  <span class="eyebrow">NO NEW ENTRY</span>
+  <h2>下一交易日：不新增仓位</h2>
+  <p>这不是系统失效，而是策略今天没有正式 A/B/C 买点。最简单的操作就是：<b>不要为了交易而交易。</b></p>
+</section>
 {% endif %}
 
-{% if live_run %}
-<section class="note"><b>最近日常扫描：</b>{{live_run.status}} ｜ {{live_run.data_date or '-'}} ｜ A {{live_run.a_count}} / B {{live_run.b_count}} / C {{live_run.c_count}} / 合计 {{live_run.combined_count}} ｜ 预筛 {{live_run.candidate_count}}</section>
-{% endif %}
+<section class="note">
+  <b>你每天的使用顺序只有两步：</b>
+  ① 晚上看“今日操作”；② 有买点时，第二天开盘输入实际成交价，照系统给出的最终仓位执行。
+  止盈不设固定目标价，避免过早砍掉右尾；系统收盘后根据各发动机规则更新卖出动作。
+</section>
 
-{% if scan %}
-<section class="note"><b>最近完整复现扫描：</b>{{scan.status}} ｜ A {{scan.a_count}} / B {{scan.b_count}} / C {{scan.c_count}} / 合计 {{scan.combined_count}} ｜ Golden matched {{scan.golden_matched if scan.golden_matched is not none else '-'}} / missing {{scan.golden_missing if scan.golden_missing is not none else '-'}} / extra {{scan.golden_extra if scan.golden_extra is not none else '-'}}</section>
-{% endif %}
+<details class="panel">
+  <summary><b>研究/数据状态（平时不用看）</b></summary>
+  <div style="margin-top:12px">
+    <p>本日 A/B/C：{{counts.A if live_current else '-'}} / {{counts.B if live_current else '-'}} / {{counts.C if live_current else '-'}}</p>
+    {% if update %}<p>最近数据更新：{{update.status}} {{update.success_count}}/{{update.stock_count}}</p>{% endif %}
+    {% if live_run %}<p>最近日常扫描：{{live_run.status}} ｜ {{live_run.data_date or '-'}} ｜ 合计 {{live_run.combined_count}}</p>{% endif %}
+    {% if scan %}<p>最近完整复现：{{scan.status}} ｜ Golden {{golden_status}}</p>{% endif %}
+  </div>
+</details>
 
 {% if live_run and live_run.status == 'running' %}
 <script>

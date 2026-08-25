@@ -586,23 +586,36 @@ def execution_calc(
     request: Request,
     signal_id: int = Form(...),
     entry_price: float = Form(...),
+    account_equity: float = Form(0),
     db=Depends(db_session),
 ):
     s = db.get(Signal, signal_id)
     if not s:
         raise HTTPException(404)
     stock = db.get(Stock, s.code)
+    limit_th = .19 if str(s.code).zfill(6).startswith("3") else .095
+    gap = entry_price / s.signal_close - 1 if s.signal_close > 0 else 0.0
     if entry_price <= s.fail_price:
-        result = {"skip": True, "reason": "实际开盘/成交价已经不高于结构失效价，结构失效，跳过。"}
+        result = {"skip": True, "reason": "实际成交价已经不高于入场风险线，结构在入场前已失效，直接跳过。"}
+    elif gap >= limit_th:
+        result = {"skip": True, "reason": "开盘接近/达到涨停锁定阈值，按 NEXT_OPEN 执行纪律不追，直接跳过。"}
     else:
         risk = (entry_price - s.fail_price) / entry_price
         budget = .015 if s.engine == "C" else .025
+        weight = min(.20, budget / risk)
+        equity = max(0.0, float(account_equity or 0.0))
+        buy_amount = equity * weight if equity > 0 else None
+        lot_shares = int(buy_amount // (entry_price * 100)) * 100 if buy_amount is not None else None
+        lot_amount = lot_shares * entry_price if lot_shares is not None else None
         result = {
-            "skip": False, "risk": risk, "weight": min(.20, budget / risk),
-            "entry": entry_price, "budget": budget,
-            "gap_vs_signal": entry_price / s.signal_close - 1,
+            "skip": False, "risk": risk, "weight": weight,
+            "entry": entry_price, "budget": budget, "gap_vs_signal": gap,
+            "buy_amount": buy_amount, "lot_shares": lot_shares, "lot_amount": lot_amount,
         }
-    return templates.TemplateResponse("execution.html", {"request": request, "signal": s, "stock": stock, "result": result})
+    return templates.TemplateResponse("execution.html", {
+        "request": request, "signal": s, "stock": stock, "result": result,
+        "entry_price": entry_price, "account_equity": account_equity,
+    })
 
 
 @app.get("/backtest", response_class=HTMLResponse)

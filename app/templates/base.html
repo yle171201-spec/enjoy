@@ -11,21 +11,21 @@
 </head>
 <body>
 <header>
-  <a class="brand" href="/">ABC 日线趋势系统 <small>V2</small></a>
+  <a class="brand" href="/">ABC 日线交易系统 <small>V2</small></a>
   <nav>
-    <a href="/">明日候选</a>
-    <a href="/screener">N日选股</a>
-    <a href="/review">历史复盘</a>
-    <a href="/backtest">执行回测</a>
+    <a href="/">今日操作</a>
+    <a href="/screener">最近信号</a>
     <a href="/portfolio">账户回测</a>
-    <a href="/data">数据管理</a>
+    <a href="/review">历史复盘</a>
+    <a href="/data">数据状态</a>
     <a href="/validation">策略校验</a>
+    <a href="/backtest">执行研究</a>
     <a href="/logout">退出</a>
   </nav>
 </header>
 <main>{% block content %}{% endblock %}</main>
 <footer>
-  Production原则：周线仅过滤大趋势；A/B/C结构全部在日线。NEXT_OPEN 是独立执行模型，不能借用 Close-entry 的历史指标。网页用于研究与机械执行辅助。
+  实盘原则：只按正式日线信号执行；收盘确认，下一交易日开盘执行。仓位由结构风险预算机械计算；不设人为固定止盈，卖出由策略动态规则触发。网页是执行辅助，不连接券商自动下单。
 </footer>
 </body>
 </html>
