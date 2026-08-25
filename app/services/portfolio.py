@@ -8,6 +8,10 @@ import numpy as np
 import pandas as pd
 
 from .execution_engine import ExecutedTrade, ExecutionParams, execute_signals
+from .rc4_final import (
+    RC4_RUNNER_FRACTION, RC4_PROOF_H, RC4_WASH5,
+    decision_index_for_date, rc4_a_runner_eligibility, rc4_a_tail_technical_exit,
+)
 
 
 @dataclass
@@ -18,6 +22,10 @@ class PortfolioParams:
     random_seed: int = 20260819
     commission_bps: float = 0.0
     stamp_tax_bps: float = 0.0
+    rc4_enabled: bool = True
+    runner_fraction: float = RC4_RUNNER_FRACTION
+    runner_proof_h: float = RC4_PROOF_H
+    runner_wash5: float = RC4_WASH5
 
 
 @dataclass
@@ -28,7 +36,42 @@ class Position:
     shares: float
     entry_date: date
     scheduled_exit_date: date
+    is_tail: bool = False
 
+
+def _next_trading_date(px: pd.DataFrame, d: date) -> date | None:
+    if px is None or px.empty:
+        return None
+    pos = int(px.index.searchsorted(d, side="right"))
+    if pos >= len(px.index):
+        return None
+    return px.index[pos]
+
+
+def _runner_info(t: ExecutedTrade, raw_df: pd.DataFrame | None, p: PortfolioParams) -> dict:
+    base = {
+        "eligible": False, "proof_h": np.nan, "ret5": np.nan,
+        "tail_exit_date": None, "tail_reason": None,
+    }
+    if raw_df is None or t.engine != "A" or t.exit_reason == "数据末端":
+        return base
+    idx = decision_index_for_date(raw_df, t.exit_date)
+    if idx is None:
+        return base
+    e = rc4_a_runner_eligibility(
+        t.h_daily, t.mfe, raw_df, idx, p.runner_proof_h, p.runner_wash5
+    )
+    base.update({
+        "eligible": bool(e.eligible),
+        "proof_h": float(e.proof_h),
+        "ret5": float(e.ret5),
+    })
+    if not e.eligible:
+        return base
+    tx = rc4_a_tail_technical_exit(raw_df, idx)
+    base["tail_exit_date"] = tx.exit_date.date() if tx.exit_date is not None else None
+    base["tail_reason"] = tx.reason
+    return base
 
 
 def _frame_maps(frames: dict[str, pd.DataFrame], codes: set[str]):
@@ -172,15 +215,45 @@ def simulate_portfolio(
 
     codes = {t.code for t in valid}
     pxmap, full_calendar = _frame_maps(frames, codes)
+    rc4_active = bool(p.rc4_enabled and execution.mode == "next_open")
+
+    runner_info: dict[int, dict] = {}
+    planned_exit: dict[int, date] = {}
+    for tid, t in enumerate(valid):
+        info = _runner_info(t, frames.get(t.code), p) if rc4_active else {
+            "eligible": False, "proof_h": np.nan, "ret5": np.nan,
+            "tail_exit_date": None, "tail_reason": None,
+        }
+        runner_info[tid] = info
+        if execution.mode == "next_open" and t.exit_reason != "数据末端":
+            nd = _next_trading_date(pxmap.get(t.code), t.exit_date)
+            planned_exit[tid] = nd or t.exit_date
+        else:
+            planned_exit[tid] = t.exit_date
+
     start = min(t.entry_date for t in valid)
-    end = max(t.exit_date for t in valid)
+    end_candidates = list(planned_exit.values())
+    end_candidates.extend([
+        x["tail_exit_date"] for x in runner_info.values()
+        if x.get("tail_exit_date") is not None
+    ])
+    if rc4_active and any(
+        x.get("eligible") and x.get("tail_exit_date") is None
+        for x in runner_info.values()
+    ) and full_calendar:
+        end_candidates.append(full_calendar[-1])
+    end = max(end_candidates) if end_candidates else max(t.exit_date for t in valid)
     calendar = [d for d in full_calendar if start <= d <= end]
 
     by_entry: dict[date, list[int]] = {}
     by_exit: dict[date, list[int]] = {}
+    by_tail_exit: dict[date, list[int]] = {}
     for tid, t in enumerate(valid):
         by_entry.setdefault(t.entry_date, []).append(tid)
-        by_exit.setdefault(t.exit_date, []).append(tid)
+        by_exit.setdefault(planned_exit[tid], []).append(tid)
+        td = runner_info[tid].get("tail_exit_date")
+        if td is not None:
+            by_tail_exit.setdefault(td, []).append(tid)
 
     rng = np.random.default_rng(p.random_seed)
     cash = 1.0
@@ -193,6 +266,9 @@ def simulate_portfolio(
     c_cap_count = 0
     equity_rows = []
     realized_rows = []
+    tail_created = 0
+    tail_technical_exits = 0
+    tail_capacity_yields = 0
 
     def held_codes():
         return {x.code for x in positions.values()}
@@ -210,13 +286,57 @@ def simulate_portfolio(
         realized_rows.append({
             "tid": tid, "code": pos.code, "engine": pos.engine,
             "entry_date": pos.entry_date, "exit_date": d, "exit_price": px,
+            "shares": pos.shares, "kind": "TAIL" if pos.is_tail else "CORE",
             "reason": reason_override or t.exit_reason,
         })
         del positions[tid]
 
+    def core_exit_position(tid: int, d: date, when: str):
+        nonlocal cash, tail_created
+        pos = positions.get(tid)
+        if pos is None or pos.is_tail:
+            return
+        t = valid[tid]
+        info = runner_info.get(tid, {})
+        if not (rc4_active and info.get("eligible")):
+            close_position(tid, d, when)
+            return
+
+        px = _mark(pxmap, pos.code, d, when)
+        if not np.isfinite(px):
+            return
+        frac = float(np.clip(p.runner_fraction, 0.0, 1.0))
+        core_shares = pos.shares * (1.0 - frac)
+        tail_shares = pos.shares - core_shares
+        if core_shares > 0:
+            cash += _sell_value(core_shares, px, p)
+            realized_rows.append({
+                "tid": tid, "code": pos.code, "engine": pos.engine,
+                "entry_date": pos.entry_date, "exit_date": d, "exit_price": px,
+                "shares": core_shares, "kind": "CORE85",
+                "reason": t.exit_reason + " -> RC4留15%",
+            })
+        pos.shares = tail_shares
+        pos.is_tail = True
+        pos.scheduled_exit_date = info.get("tail_exit_date") or (calendar[-1] if calendar else d)
+        tail_created += 1
+
     for d in calendar:
         if execution.mode == "next_open":
-            # Entries happen at the open; positions that exit at today's close still occupy capacity.
+            # Decisions at close execute next open; exits free cash/capacity first.
+            for tid in list(by_exit.get(d, [])):
+                if (
+                    tid in positions
+                    and not positions[tid].is_tail
+                    and valid[tid].exit_reason != "数据末端"
+                ):
+                    core_exit_position(tid, d, "open")
+
+            for tid in list(by_tail_exit.get(d, [])):
+                if tid in positions and positions[tid].is_tail:
+                    close_position(tid, d, "open", "RC4_MA30_3close_next_open")
+                    tail_technical_exits += 1
+
             candidates = list(by_entry.get(d, []))
             ab = [tid for tid in candidates if valid[tid].engine in {"A", "B"}]
             cc = [tid for tid in candidates if valid[tid].engine == "C"]
@@ -228,8 +348,23 @@ def simulate_portfolio(
                     duplicate_count += 1
                     rejection_rows.append({"date": d, "code": t.code, "engine": t.engine, "reason": "duplicate_code"})
                     continue
+                while len(positions) >= p.max_positions:
+                    tails = [x for x, pos in positions.items() if pos.is_tail]
+                    if not tails:
+                        break
+                    old = min(
+                        tails,
+                        key=lambda x: _mark(pxmap, positions[x].code, d, "open")
+                        / max(valid[x].entry_price, 1e-12),
+                    )
+                    close_position(old, d, "open", "RC4_tail_yield_fresh_AB")
+                    tail_capacity_yields += 1
+
                 if len(positions) >= p.max_positions and p.c_yields_to_ab:
-                    cpos = [x for x, pos in positions.items() if pos.engine == "C"]
+                    cpos = [
+                        x for x, pos in positions.items()
+                        if pos.engine == "C" and not pos.is_tail
+                    ]
                     if cpos:
                         # With max C=1 this is deterministic. If >1, yield weakest marked C.
                         old = min(cpos, key=lambda x: _mark(pxmap, positions[x].code, d, "open") / valid[x].entry_price)
@@ -271,11 +406,6 @@ def simulate_portfolio(
                 cash -= used
                 positions[tid] = Position(tid, t.code, t.engine, sh, d, t.exit_date)
                 accepted.append(tid); c_now += 1
-
-            # Tested dynamic exits occur at close.
-            for tid in list(by_exit.get(d, [])):
-                if tid in positions:
-                    close_position(tid, d, "close")
 
         else:
             # close-entry: tested exits first, then new entries at same close.
@@ -337,12 +467,22 @@ def simulate_portfolio(
                 positions[tid] = Position(tid, t.code, t.engine, sh, d, t.exit_date)
                 accepted.append(tid); c_now += 1
 
+        if execution.mode == "next_open":
+            for tid in list(by_exit.get(d, [])):
+                if (
+                    tid in positions
+                    and not positions[tid].is_tail
+                    and valid[tid].exit_reason == "数据末端"
+                ):
+                    close_position(tid, d, "close", "数据末端")
+
         eq_close = _equity(cash, positions, pxmap, d, "close")
         equity_rows.append({
             "date": d, "equity": eq_close, "cash": cash, "positions": len(positions),
             "a": sum(1 for x in positions.values() if x.engine == "A"),
             "b": sum(1 for x in positions.values() if x.engine == "B"),
-            "c": sum(1 for x in positions.values() if x.engine == "C"),
+            "c": sum(1 for x in positions.values() if x.engine == "C" and not x.is_tail),
+            "tails": sum(1 for x in positions.values() if x.is_tail),
         })
 
     eqdf = pd.DataFrame(equity_rows)
@@ -371,6 +511,11 @@ def simulate_portfolio(
         "accepted_A": int(accepted_engines.get("A", 0)),
         "accepted_B": int(accepted_engines.get("B", 0)),
         "accepted_C": int(accepted_engines.get("C", 0)),
+        "rc4_enabled": rc4_active,
+        "rc4_tail_created": int(tail_created),
+        "rc4_tail_technical_exits": int(tail_technical_exits),
+        "rc4_tail_capacity_yields": int(tail_capacity_yields),
+        "rc4_tail_open_at_end": int(sum(1 for x in positions.values() if x.is_tail)),
         "calmar_like": float(cagr / abs(ddm["mdd"])) if np.isfinite(cagr) and ddm["mdd"] < 0 else np.nan,
     }
 
@@ -384,6 +529,10 @@ def simulate_portfolio(
             "return": t.net_return, "risk_pct": t.risk_pct,
             "target_weight": t.target_weight, "gap_pct": t.gap_pct,
             "exit_reason": t.exit_reason,
+            "rc4_runner_eligible": bool(runner_info[tid].get("eligible")),
+            "rc4_proof_h": runner_info[tid].get("proof_h"),
+            "rc4_ret5": runner_info[tid].get("ret5"),
+            "rc4_tail_exit_date": runner_info[tid].get("tail_exit_date"),
         })
 
     return {
@@ -391,6 +540,7 @@ def simulate_portfolio(
         "equity": eqdf.to_dict("records"),
         "yearly": _yearly(eqdf),
         "trades": accepted_rows,
+        "realized": realized_rows,
         "rejections": rejection_rows,
         "skipped_detail": [
             {"code": t.code, "engine": t.engine, "signal_date": t.signal_date, "reason": t.skip_reason}
@@ -416,6 +566,10 @@ def monte_carlo_portfolio(
             random_seed=portfolio.random_seed + i,
             commission_bps=portfolio.commission_bps,
             stamp_tax_bps=portfolio.stamp_tax_bps,
+            rc4_enabled=portfolio.rc4_enabled,
+            runner_fraction=portfolio.runner_fraction,
+            runner_proof_h=portfolio.runner_proof_h,
+            runner_wash5=portfolio.runner_wash5,
         )
         r = simulate_portfolio(trades, frames, execution, pp)["metrics"]
         rows.append(r)
