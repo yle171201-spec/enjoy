@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}账户回测{% endblock %}
 {% block content %}
-<div class="section-head"><div><span class="eyebrow">PORTFOLIO MTM</span><h1>K5 / K7 账户级回测</h1><p>逐日 mark-to-market，A/B优先于C；C最多1只，满仓出现新A/B时C可让位。NEXT_OPEN在开盘入场、动态退出在收盘执行。</p></div></div>
+<div class="section-head"><div><span class="eyebrow">PORTFOLIO MTM · V2.3.4-RC4</span><h1>K5 / K7 账户级回测</h1><p>逐日 mark-to-market，A/B优先于C；C最多1只，满仓出现新A/B时C可让位。已安装 RC4 FINAL 经审计尾仓管理层：A Runner 无固定持有上限，连续3日收盘低于MA30后次日开盘退出；本构建不臆造缺失的 A15P3 尾仓资格触发器，因此买点生成仍保持冻结V18。</p></div></div>
 <form class="toolbar" method="post">
 <label>发动机<select name="engines">{% for x in ['ABC','AB','AC','BC','A','B','C'] %}<option {% if engines==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label>
 <label>执行<select name="execution"><option value="next_open" {% if execution!='close' %}selected{% endif %}>次日开盘</option><option value="close" {% if execution=='close' %}selected{% endif %}>信号收盘</option></select></label>

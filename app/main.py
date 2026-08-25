@@ -23,6 +23,7 @@ from .services.live_scan import (
     recover_interrupted_live_scans,
 )
 from .services.backtest import close_vs_next_open, portfolio_backtest
+from .services.rc4_final import rc4_status
 from .services.chart_service import build_stock_chart
 from .services.review_service import (
     review_index_data, review_case_data, save_signal_review, build_review_chart,
@@ -566,6 +567,11 @@ def stock_page(code: str, request: Request, db=Depends(db_session)):
 @app.get("/api/stock/{code}/chart")
 def stock_chart(code: str, limit: int = Query(520, ge=120, le=1500), db=Depends(db_session)):
     return build_stock_chart(db, code, limit)
+
+
+@app.get("/api/rc4/status")
+def rc4_status_api():
+    return rc4_status()
 
 
 @app.get("/execution", response_class=HTMLResponse)
