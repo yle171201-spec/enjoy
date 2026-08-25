@@ -29,6 +29,30 @@ def _rss_mb() -> float | None:
 
 
 
+def _current_rss_mb() -> float | None:
+    try:
+        import os
+        page = os.sysconf("SC_PAGE_SIZE")
+        with open("/proc/self/statm", "r", encoding="utf-8") as f:
+            parts = f.read().split()
+        return int(parts[1]) * page / (1024.0 * 1024.0) if len(parts) >= 2 else None
+    except Exception:
+        return None
+
+
+def _memory_note() -> str:
+    cur = _current_rss_mb()
+    peak = _rss_mb()
+    bits = []
+    if cur is not None:
+        bits.append(f"当前RSS {cur:.0f} MB")
+    if peak is not None:
+        bits.append(f"峰值RSS {peak:.0f} MB")
+    return ("；" + " / ".join(bits)) if bits else ""
+
+
+
+
 def _attach_exit_dates(sig: pd.DataFrame, frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
     if sig.empty or "exit_idx" not in sig.columns:
         return sig
@@ -172,8 +196,7 @@ def run_full_scan(db, force: bool = False):
 
         def load_progress(done: int, total: int, assembled: int) -> None:
             pct = 8.0 + 14.0 * (done / max(1, total))
-            rss = _rss_mb()
-            mem = f"；峰值RSS {rss:.0f} MB" if rss is not None else ""
+            mem = _memory_note()
             _set_progress(
                 db, run, pct, "加载全市场日线",
                 f"已读取 {done}/{total} 只；已组装 {assembled} 只{mem}"
@@ -188,14 +211,12 @@ def run_full_scan(db, force: bool = False):
         if not frames:
             raise RuntimeError("数据库没有日线数据，请先更新/导入数据")
 
-        rss = _rss_mb()
-        mem = f"；峰值RSS {rss:.0f} MB" if rss is not None else ""
+        mem = _memory_note()
         _set_progress(db, run, 22, "加载全市场日线", f"已分批载入 {len(frames)} 只股票{mem}，准备进入 V18")
 
         def engine_progress(stage: str, fraction: float, detail: str = "") -> None:
             overall = 24.0 + 64.0 * float(max(0.0, min(1.0, fraction)))
-            rss = _rss_mb()
-            mem = f"；峰值RSS {rss:.0f} MB" if rss is not None else ""
+            mem = _memory_note()
             _set_progress(db, run, overall, stage, detail + mem)
 
         state_capture = {"market": None, "a60": []}

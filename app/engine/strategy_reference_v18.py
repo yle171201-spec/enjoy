@@ -226,6 +226,22 @@ def build_market_context(stocks: Dict[str,pd.DataFrame]) -> MarketContext:
 
 
 
+
+def _release_process_memory() -> None:
+    """GC + glibc malloc_trim; strategy math is unchanged."""
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        trim = getattr(libc, "malloc_trim", None)
+        if trim is not None:
+            trim(0)
+    except Exception:
+        pass
+
+
+
 def build_market_context_compact(stocks: Dict[str,pd.DataFrame]) -> MarketContext:
     """Memory-compact equivalent of build_market_context()."""
     eligible = [(code, df) for code, df in stocks.items() if eligible_code(code)]
@@ -286,10 +302,17 @@ def build_market_context_compact(stocks: Dict[str,pd.DataFrame]) -> MarketContex
             np.add.at(mom_sum, pp[valid], mom[valid].astype(np.float64))
             np.add.at(mom_n, pp[valid], 1)
 
+    # Row-wise exact equivalent, avoiding a large axis-reduction temporary.
+    qvals = np.full(n_dates, np.nan, dtype=np.float64)
     with np.errstate(all="ignore"):
-        qvals = np.nanquantile(abase_matrix, 0.40, axis=1, method="linear")
+        for i in range(n_dates):
+            row = abase_matrix[i]
+            finite = row[np.isfinite(row)]
+            if len(finite):
+                qvals[i] = np.quantile(finite, 0.40, method="linear")
     q40 = pd.Series(qvals, index=calendar)
     del abase_matrix
+    _release_process_memory()
 
     above_vals = np.full(n_dates, np.nan, dtype=float)
     mom_vals = np.full(n_dates, np.nan, dtype=float)
@@ -1178,14 +1201,14 @@ def run_close_reference(
                 raw_stocks.pop(code, None)
 
             if i==len(keys) or i%step==0:
-                gc.collect()
+                _release_process_memory()
                 emit("V18数据预处理", 0.18*(i/total), f"已原位预处理 {i}/{len(keys)} 只股票")
 
         stocks=raw_stocks
-        gc.collect()
+        _release_process_memory()
         emit("构建市场横截面", 0.20, f"紧凑横截面；策略有效股票 {len(stocks)} 只")
         market=build_market_context_compact(stocks)
-        gc.collect()
+        _release_process_memory()
     else:
         stocks={}
         items=list(raw_stocks.items())
@@ -1207,16 +1230,20 @@ def run_close_reference(
         except Exception:
             pass
 
+    _release_process_memory()
     emit("Engine A", 0.24, "正在扫描 A 结构")
     a,peer_pool=scan_a_final(stocks,market,p,state_cb=state_cb)
+    _release_process_memory()
     emit("Engine A", 0.48, f"A 完成：{len(a)} 条；peer pool {len(peer_pool)}")
 
     emit("Engine B", 0.50, "正在扫描 B 结构")
     b=scan_b_final(stocks,market,p)
+    _release_process_memory()
     emit("Engine B", 0.66, f"B 完成：{len(b)} 条")
 
     emit("Engine C", 0.68, "正在扫描 C 结构")
     c=scan_c_final(stocks,market,p)
+    _release_process_memory()
     emit("Engine C", 0.82, f"C 完成：{len(c)} 条")
 
     emit("风险与组合", 0.84, "计算 H / fail price / target weight")

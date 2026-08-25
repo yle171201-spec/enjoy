@@ -141,7 +141,7 @@ def load_all_frames(db, start_date=None):
 def load_all_frames_batched(
     db,
     start_date=None,
-    batch_size: int = 160,
+    batch_size: int = 40,
     progress_cb=None,
 ):
     """Load all frames in small code batches to cap peak pandas memory."""
@@ -175,6 +175,14 @@ def load_all_frames_batched(
         out.update(_df_to_frames(x))
         del x
         gc.collect()
+        try:
+            import ctypes
+            libc = ctypes.CDLL("libc.so.6")
+            trim = getattr(libc, "malloc_trim", None)
+            if trim is not None:
+                trim(0)
+        except Exception:
+            pass
 
         done = min(total, start + len(batch))
         if progress_cb is not None:
