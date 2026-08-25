@@ -173,3 +173,28 @@ class SignalReview(Base):
         ),
         Index("ix_signal_review_version_date", "strategy_version", "signal_date"),
     )
+
+class LivePosition(Base):
+    __tablename__ = "live_positions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    signal_id: Mapped[int] = mapped_column(Integer, unique=True, index=True)
+    strategy_version: Mapped[str] = mapped_column(String(32), default="V18+RC4A")
+    code: Mapped[str] = mapped_column(String(6), index=True)
+    engine: Mapped[str] = mapped_column(String(1), index=True)
+    signal_date: Mapped[date] = mapped_column(Date, index=True)
+    entry_date: Mapped[date] = mapped_column(Date)
+    entry_price: Mapped[float] = mapped_column(Float)
+    initial_shares: Mapped[int] = mapped_column(Integer)
+    shares: Mapped[int] = mapped_column(Integer)
+    account_equity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fail_price: Mapped[float] = mapped_column(Float)
+    stage: Mapped[str] = mapped_column(String(16), default="CORE")
+    status: Mapped[str] = mapped_column(String(16), default="OPEN", index=True)
+    tail_decision_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    core_exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    core_exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    core_exit_shares: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exit_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str] = mapped_column(String(96), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

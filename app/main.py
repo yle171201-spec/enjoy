@@ -12,7 +12,7 @@ from sqlalchemy import select, func, distinct, text
 
 from .config import settings
 from .db import init_db, db_session, SessionLocal
-from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock, LatestDayAudit, LiveScanRun, SignalReview
+from .models import Stock, DailyBar, Signal, ScanRun, DataUpdateRun, BootstrapStock, LatestDayAudit, LiveScanRun, SignalReview, LivePosition
 from .auth import valid_password, make_cookie, is_logged_in, COOKIE
 from .services.repository import latest_trade_date, latest_prices
 from .services.strategy_service import (
@@ -22,8 +22,9 @@ from .services.live_scan import (
     run_live_scan, live_progress_payload, live_state_status,
     recover_interrupted_live_scans,
 )
-from .services.backtest import close_vs_next_open, portfolio_backtest, compare_portfolio_results
+from .services.backtest import close_vs_next_open, portfolio_backtest
 from .services.rc4_final import rc4_status
+from .services.position_service import position_dashboard, closed_positions
 from .services.chart_service import build_stock_chart
 from .services.review_service import (
     review_index_data, review_case_data, save_signal_review, build_review_chart,
@@ -435,6 +436,7 @@ def dashboard(request: Request, db=Depends(db_session)):
         golden_status = "FAIL"
 
     state = live_state_status(db, latest)
+    positions = position_dashboard(db)
     return templates.TemplateResponse("dashboard.html", {
         "request": request, "latest": latest, "scan": scan,
         "live_run": live_run, "live_progress": live_progress_payload(live_run),
@@ -442,7 +444,7 @@ def dashboard(request: Request, db=Depends(db_session)):
         "scan_busy": _scan_job_busy(db), "data_busy": _data_job_busy(db),
         "signals": sigs, "signal_date": latest, "counts": counts,
         "golden_status": golden_status, "update": update, "state": state,
-        "web_version": settings.web_version,
+        "positions": positions, "web_version": settings.web_version,
     })
 
 @app.get("/review", response_class=HTMLResponse)
@@ -687,6 +689,43 @@ def execution_calc(
     })
 
 
+
+@app.get("/positions", response_class=HTMLResponse)
+def positions_page(request: Request, db=Depends(db_session)):
+    return templates.TemplateResponse("positions.html", {"request": request, "data": position_dashboard(db), "closed": closed_positions(db)})
+
+@app.post("/positions/open")
+def position_open(signal_id:int=Form(...), entry_date:str=Form(...), entry_price:float=Form(...),
+                  shares:int=Form(...), account_equity:float=Form(0), db=Depends(db_session)):
+    sig=db.get(Signal,signal_id)
+    if sig is None: raise HTTPException(404,"正式信号不存在")
+    if entry_price<=sig.fail_price or shares<=0: raise HTTPException(400,"成交参数无效")
+    if db.execute(select(LivePosition).where(LivePosition.signal_id==signal_id)).scalar_one_or_none():
+        return RedirectResponse("/positions",303)
+    db.add(LivePosition(signal_id=signal_id,strategy_version="V18+RC4A",code=sig.code,engine=sig.engine,
+        signal_date=sig.signal_date,entry_date=date.fromisoformat(entry_date),entry_price=entry_price,
+        initial_shares=shares,shares=shares,account_equity=account_equity or None,
+        fail_price=sig.fail_price,stage="CORE",status="OPEN"))
+    db.commit(); return RedirectResponse("/positions",303)
+
+@app.post("/positions/{position_id}/tail")
+def position_tail(position_id:int, decision_date:str=Form(...), exit_price:float=Form(...),
+                  remaining_shares:int=Form(...), db=Depends(db_session)):
+    p=db.get(LivePosition,position_id)
+    if p is None or p.status!="OPEN": raise HTTPException(404)
+    if remaining_shares<=0 or remaining_shares>=p.shares: raise HTTPException(400)
+    p.core_exit_date=date.today(); p.core_exit_price=exit_price; p.core_exit_shares=p.shares-remaining_shares
+    p.shares=remaining_shares; p.stage="TAIL"; p.tail_decision_date=date.fromisoformat(decision_date)
+    p.exit_reason="主体仓已兑现，RC4尾仓继续"; db.commit()
+    return RedirectResponse("/positions",303)
+
+@app.post("/positions/{position_id}/close")
+def position_close(position_id:int, exit_price:float=Form(...), reason:str=Form("系统卖出"), db=Depends(db_session)):
+    p=db.get(LivePosition,position_id)
+    if p is None or p.status!="OPEN": raise HTTPException(404)
+    p.status="CLOSED"; p.exit_date=date.today(); p.exit_price=exit_price; p.exit_reason=reason[:96]; p.shares=0
+    db.commit(); return RedirectResponse("/positions",303)
+
 @app.get("/backtest", response_class=HTMLResponse)
 def backtest_page(request: Request):
     return templates.TemplateResponse("backtest.html", {"request": request, "result": None, "start": settings.bootstrap_start_date, "web_version": settings.web_version})
@@ -716,7 +755,7 @@ def backtest_run(
 
 @app.get("/portfolio", response_class=HTMLResponse)
 def portfolio_page(request: Request):
-    return templates.TemplateResponse("portfolio.html", {"request": request, "result": None, "start": settings.bootstrap_start_date})
+    return templates.TemplateResponse("portfolio.html", {"request": request, "result": None, "start": settings.bootstrap_start_date, "k":6, "ab_risk":2.5, "c_risk":1.5, "max_weight":20, "slippage_bps":0, "commission_bps":0, "stamp_tax_bps":0, "monte_carlo_seeds":0})
 
 
 @app.post("/portfolio", response_class=HTMLResponse)
@@ -724,7 +763,7 @@ def portfolio_run(
     request: Request,
     engines: str = Form("ABC"),
     execution: str = Form("next_open"),
-    k: int = Form(5),
+    k: int = Form(6),
     ab_risk: float = Form(2.5),
     c_risk: float = Form(1.5),
     max_weight: float = Form(20.0),
@@ -748,18 +787,13 @@ def portfolio_run(
     result = portfolio_backtest(
         **common, monte_carlo_seeds=monte_carlo_seeds, rc4_enabled=True,
     )
-    baseline = portfolio_backtest(
-        **common, monte_carlo_seeds=0, rc4_enabled=False,
-    )
-    comparison = compare_portfolio_results(result, baseline)
     chart = json.dumps({
         "dates": [str(x["date"]) for x in result.get("equity", [])],
         "equity": [x["equity"] for x in result.get("equity", [])],
         "positions": [x["positions"] for x in result.get("equity", [])],
     }, ensure_ascii=False)
     return templates.TemplateResponse("portfolio.html", {
-        "request": request, "result": result, "baseline": baseline,
-        "comparison": comparison, "chart_json": chart,
+        "request": request, "result": result, "chart_json": chart,
         "engines": engines, "execution": execution, "k": k, "ab_risk": ab_risk,
         "c_risk": c_risk, "max_weight": max_weight, "start": start, "end": end,
         "slippage_bps": slippage_bps, "commission_bps": commission_bps,
