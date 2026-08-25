@@ -781,6 +781,25 @@ def sync_daily_public(db, now: datetime | None = None):
         return {"status": "skipped", "target": None, "rows": 0, "message": str(e)}
 
     before = latest_trade_date(db)
+
+    if before is not None and target > before:
+        lookback_start = max(date.fromisoformat(settings.bootstrap_start_date), target - timedelta(days=20))
+        prev_days = provider.trade_dates(lookback_start, target - timedelta(days=1))
+        prev_trade = max(prev_days) if prev_days else None
+        if prev_trade is not None:
+            strategy_pool = int(db.execute(select(func.count(Stock.code)).where(Stock.is_st.is_(False))).scalar_one() or 0)
+            prev_state = _latest_day_audit_stats(db, prev_trade, strategy_pool)
+            if prev_state["latest_verified_coverage"] < settings.min_latest_verified_coverage:
+                run = _new_run(db, pname, prev_trade, target)
+                run.status = "skipped"
+                run.message = (
+                    f"禁止跨日写入快照：前一交易日 {prev_trade} 已核验覆盖 "
+                    f"{prev_state['latest_verified_coverage']:.1%} < {settings.min_latest_verified_coverage:.1%}；"
+                    "先走历史补齐/停牌审计。"
+                )
+                run.finished_at = datetime.utcnow(); db.commit()
+                return {"status":"history_gap","target":target,"rows":0,"message":run.message}
+
     run = _new_run(db, pname, target, target)
     try:
         if getattr(provider, "name", "") == "public":

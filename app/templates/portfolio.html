@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}账户回测{% endblock %}
 {% block content %}
-<div class="section-head"><div><span class="eyebrow">PORTFOLIO MTM · V2.3.6-AUDIT</span><h1>K5 / K7 账户级回测</h1><p>冻结V18买点不变；RC4 A Runner已接入账户执行：A在原卖出决策前已达到≥3H且决策日5日收益≤-8%时，次日开盘兑现85%、保留15%尾仓；尾仓无固定时限，连续3日收盘低于MA30后次日开盘退出。满仓遇新A/B时尾仓先让位，再考虑C让位。</p></div></div>
+<div class="section-head"><div><span class="eyebrow">PORTFOLIO MTM · V2.3.8-INTEGRITY</span><h1>账户级回测</h1><p>冻结V18买点不变；RC4 A Runner已接入账户执行：A在原卖出决策前已达到≥3H且决策日5日收益≤-8%时，次日开盘兑现85%、保留15%尾仓；尾仓无固定时限，连续3日收盘低于MA30后次日开盘退出。满仓遇新A/B时尾仓先让位，再考虑C让位。</p></div></div>
 <form class="toolbar" method="post">
 <label>发动机<select name="engines">{% for x in ['ABC','AB','AC','BC','A','B','C'] %}<option {% if engines==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label>
 <label>执行<select name="execution"><option value="next_open" {% if execution!='close' %}selected{% endif %}>次日开盘</option><option value="close" {% if execution=='close' %}selected{% endif %}>信号收盘</option></select></label>
@@ -17,8 +17,8 @@
 <button>运行账户回测</button>
 </form>
 {% if result %}{% set m=result.metrics %}
-<div class="metrics portfolio-metrics"><div><span>CAGR</span><b>{{'%.1f%%'|format(m.cagr*100)}}</b></div><div><span>最大回撤</span><b class="neg">{{'%.1f%%'|format(m.mdd*100)}}</b></div><div><span>终值</span><b>{{'%.2f'|format(m.terminal)}}x</b></div><div><span>CAGR/|MDD|</span><b>{{'%.2f'|format(m.calmar_like)}}</b></div><div><span>接纳交易</span><b>{{m.accepted}}</b></div><div><span>满仓拒绝</span><b>{{m.full_rejections}}</b></div><div><span>C让位</span><b>{{m.c_replacements}}</b></div><div><span>最长水下</span><b>{{m.max_underwater_days}}T</b></div></div>
-<div class="note"><b>最大回撤区间：</b>{{m.peak_date or '-'}} → {{m.trough_date or '-'}} ｜ 恢复 {{m.recovery_date or '样本末未恢复'}} ｜ 接纳 A/B/C = {{m.accepted_A}} / {{m.accepted_B}} / {{m.accepted_C}}</div>
+<div class="metrics portfolio-metrics"><div><span>CAGR</span><b>{{'%.1f%%'|format(m.cagr*100)}}</b></div><div><span>最大回撤</span><b class="neg">{{'%.1f%%'|format(m.mdd*100)}}</b></div><div><span>终值</span><b>{{'%.2f'|format(m.terminal)}}x</b></div><div><span>CAGR/|MDD|</span><b>{{'%.2f'|format(m.calmar_like)}}</b></div><div><span>接纳交易</span><b>{{m.accepted}}</b></div><div><span>平均持仓</span><b>{{'%.2f'|format(m.avg_positions)}}</b></div><div><span>平均资金暴露</span><b>{{'%.1f%%'|format(m.avg_exposure*100)}}</b></div><div><span>实际最大持仓</span><b>{{m.max_positions_seen}}</b></div><div><span>满仓拒绝</span><b>{{m.full_rejections}}</b></div><div><span>C让位</span><b>{{m.c_replacements}}</b></div><div><span>最长水下</span><b>{{m.max_underwater_days}}T</b></div></div>
+<div class="note"><b>最大回撤区间：</b>{{m.peak_date or '-'}} → {{m.trough_date or '-'}} ｜ 恢复 {{m.recovery_date or '样本末未恢复'}} ｜ 接纳 A/B/C = {{m.accepted_A}} / {{m.accepted_B}} / {{m.accepted_C}}</div>{% if result.diagnostics %}{% set d=result.diagnostics %}<div class="note"><b>数据体检：</b>输入 {{d.input_signals}} ｜ 执行对象 {{d.execution_objects}} ｜ 异常 <span class="{{'neg' if d.execution_error_count else 'ok'}}">{{d.execution_error_count}}</span> ｜ V18={{d.source_counts.get('V18',0)}} / LIVE={{d.source_counts.get('V18-LIVE',0)}} ｜ {{d.signal_start or '-'}} → {{d.signal_end or '-'}}</div>{% endif %}
 {% if baseline and comparison %}{% set b=baseline.metrics %}{% set cp=comparison %}
 <section>
 <h2>Baseline V18 vs RC4A · 同参数同 Seed</h2>

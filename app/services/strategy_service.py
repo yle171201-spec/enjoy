@@ -167,7 +167,7 @@ def run_full_scan(db, force: bool = False):
         run.data_date = latest
         db.commit()
 
-        cutoff = latest - timedelta(days=settings.live_scan_calendar_days) if latest else None
+        cutoff = datetime.strptime(settings.bootstrap_start_date, "%Y-%m-%d").date() if latest else None
         _set_progress(db, run, 8, "加载全市场日线", f"分批读取 {cutoff or '-'} → {latest or '-'}；避免一次性载入百万行 DataFrame")
 
         def load_progress(done: int, total: int, assembled: int) -> None:

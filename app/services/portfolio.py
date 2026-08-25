@@ -208,7 +208,7 @@ def simulate_portfolio(
                 "recovery_date": None, "max_underwater_days": 0, "accepted": 0, "rejected": 0,
                 "skipped": len(skipped), "full_rejections": 0, "duplicate_rejections": 0,
                 "c_cap_rejections": 0, "c_replacements": 0, "accepted_A": 0, "accepted_B": 0,
-                "accepted_C": 0, "rc4_enabled": bool(p.rc4_enabled and execution.mode == "next_open"),
+                "accepted_C": 0, "avg_positions": 0.0, "max_positions_seen": 0, "avg_exposure": 0.0, "rc4_enabled": bool(p.rc4_enabled and execution.mode == "next_open"),
                 "rc4_tail_created": 0, "rc4_tail_technical_exits": 0,
                 "rc4_tail_capacity_yields": 0, "rc4_tail_open_at_end": 0,
                 "calmar_like": 0.0
@@ -497,6 +497,15 @@ def simulate_portfolio(
     cagr = terminal ** (1 / years) - 1 if years > 0 and terminal > 0 else np.nan
 
     accepted_engines = pd.Series([valid[x].engine for x in accepted]).value_counts().to_dict() if accepted else {}
+    avg_positions = float(eqdf["positions"].mean()) if len(eqdf) else 0.0
+    max_positions_seen = int(eqdf["positions"].max()) if len(eqdf) else 0
+    if len(eqdf):
+        denom = eqdf["equity"].replace(0, np.nan)
+        exposure_series = ((eqdf["equity"] - eqdf["cash"]) / denom).replace([np.inf, -np.inf], np.nan).dropna()
+        avg_exposure = float(exposure_series.mean()) if len(exposure_series) else 0.0
+    else:
+        avg_exposure = 0.0
+
     metrics = {
         "terminal": terminal,
         "cagr": float(cagr),
@@ -515,6 +524,9 @@ def simulate_portfolio(
         "accepted_A": int(accepted_engines.get("A", 0)),
         "accepted_B": int(accepted_engines.get("B", 0)),
         "accepted_C": int(accepted_engines.get("C", 0)),
+        "avg_positions": avg_positions,
+        "max_positions_seen": max_positions_seen,
+        "avg_exposure": avg_exposure,
         "rc4_enabled": rc4_active,
         "rc4_tail_created": int(tail_created),
         "rc4_tail_technical_exits": int(tail_technical_exits),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 import json
 from typing import Any, Iterable
@@ -383,19 +383,75 @@ def execute_signal(signal: Any, raw_df: pd.DataFrame, params: ExecutionParams | 
 
 
 
-def execute_signals(signals: Iterable[Any], frames: dict[str, pd.DataFrame], params: ExecutionParams | None = None) -> list[ExecutedTrade]:
+def materialize_next_open_exit(
+    trade: ExecutedTrade,
+    raw_df: pd.DataFrame,
+    params: ExecutionParams | None = None,
+) -> ExecutedTrade:
+    """Convert a close-confirmed exit decision to the following trading-day open.
+
+    The core engine keeps the decision date because RC4/account logic needs that
+    point-in-time state. Execution research calls this helper for actual NEXT_OPEN
+    sale prices without double-shifting the portfolio layer.
+    """
+    p = params or ExecutionParams(mode="next_open")
+    if trade.skip_reason or p.mode != "next_open":
+        return trade
+    if trade.exit_reason in {"数据末端", "无次日数据"}:
+        return trade
+    if raw_df is None or raw_df.empty:
+        raise ValueError(f"missing frame for next-open exit {trade.code}")
+
+    df = ensure_frame(raw_df)
+    decision_idx = _signal_index(df, trade.exit_date)
+    if decision_idx is None:
+        raise ValueError(f"exit decision date {trade.exit_date} not found for {trade.code}")
+    next_idx = decision_idx + 1
+    if next_idx >= len(df):
+        px = float(df["close"].iloc[decision_idx])
+        gross = px / trade.entry_price - 1
+        net = _net_return(trade.entry_price, px, p)
+        return replace(
+            trade, exit_price=px, exit_idx=decision_idx,
+            gross_return=float(gross), net_return=float(net), exit_reason="数据末端",
+        )
+
+    px = float(df["open"].iloc[next_idx])
+    gross = px / trade.entry_price - 1
+    net = _net_return(trade.entry_price, px, p)
+    return replace(
+        trade,
+        exit_date=df["date"].iloc[next_idx].date(),
+        exit_price=px,
+        exit_idx=next_idx,
+        gross_return=float(gross),
+        net_return=float(net),
+    )
+
+
+def execute_signals(
+    signals: Iterable[Any],
+    frames: dict[str, pd.DataFrame],
+    params: ExecutionParams | None = None,
+    errors: list[dict] | None = None,
+) -> list[ExecutedTrade]:
     p = params or ExecutionParams()
     out: list[ExecutedTrade] = []
     prepared: dict[str, pd.DataFrame] = {}
     for s in signals:
         code = str(getattr(s, "code")).zfill(6)
+        engine = str(getattr(s, "engine", ""))
+        sdate = getattr(s, "signal_date", None)
         if code not in frames:
+            if errors is not None:
+                errors.append({"stage":"missing_frame","code":code,"engine":engine,"signal_date":str(sdate),"error":"no daily frame"})
             continue
         try:
             if code not in prepared:
                 prepared[code] = _ensure_indicators(frames[code], code)
             out.append(execute_signal(s, frames[code], p, prepared[code]))
-        except Exception:
-            # Keep batch backtests robust; Golden validation remains the hard correctness gate.
+        except Exception as e:
+            if errors is not None:
+                errors.append({"stage":"execute_signal","code":code,"engine":engine,"signal_date":str(sdate),"error":f"{type(e).__name__}: {e}"})
             continue
     return out

@@ -195,11 +195,19 @@ def _diagnosis_labels(flags: list[str]) -> list[str]:
 
 
 def _load_review_universe(db):
-    signals = db.execute(
+    raw_signals = db.execute(
         select(Signal)
-        .where(Signal.strategy_version == "V18")
+        .where(Signal.strategy_version.in_(("V18", "V18-LIVE")))
         .order_by(Signal.signal_date, Signal.code, Signal.engine)
     ).scalars().all()
+
+    logical = {}
+    for s in raw_signals:
+        key = (str(s.code).zfill(6), s.signal_date, s.engine)
+        cur = logical.get(key)
+        if cur is None or (s.strategy_version == "V18" and cur.strategy_version != "V18"):
+            logical[key] = s
+    signals = sorted(logical.values(), key=lambda x: (x.signal_date, x.code, x.engine))
 
     if not signals:
         return [], {}, {}, {}
@@ -220,18 +228,21 @@ def _load_review_universe(db):
         bar_map.setdefault(str(b.code).zfill(6), []).append(b)
 
     reviews = db.execute(
-        select(SignalReview).where(SignalReview.strategy_version == "V18")
+        select(SignalReview).where(SignalReview.strategy_version.in_(("V18", "V18-LIVE")))
     ).scalars().all()
-    review_map = {
-        (r.strategy_version, r.code, r.signal_date, r.engine): r
-        for r in reviews
-    }
+    review_map = {}
+    for r in reviews:
+        review_map[(r.strategy_version, r.code, r.signal_date, r.engine)] = r
+        logical_key = (r.code, r.signal_date, r.engine)
+        cur = review_map.get(logical_key)
+        if cur is None or (r.updated_at and (not cur.updated_at or r.updated_at > cur.updated_at)):
+            review_map[logical_key] = r
     return signals, stock_map, bar_map, review_map
 
 
 def _row_from_signal(signal, stock_map, bar_map, review_map):
     code = str(signal.code).zfill(6)
-    review = review_map.get(_review_key(signal))
+    review = review_map.get(_review_key(signal)) or review_map.get((code, signal.signal_date, signal.engine))
     try:
         tags = json.loads(review.tags_json or "[]") if review else []
         if not isinstance(tags, list):
@@ -496,7 +507,7 @@ def save_signal_review(db, signal_id: int, rating: str, tags: list[str], note: s
     signal = db.execute(
         select(Signal).where(
             Signal.id == signal_id,
-            Signal.strategy_version == "V18",
+            Signal.strategy_version.in_(("V18", "V18-LIVE")),
         )
     ).scalar_one_or_none()
     if signal is None:
@@ -538,7 +549,7 @@ def build_review_chart(db, signal_id: int, pre: int = 60, post: int = 40) -> dic
     signal = db.execute(
         select(Signal).where(
             Signal.id == signal_id,
-            Signal.strategy_version == "V18",
+            Signal.strategy_version.in_(("V18", "V18-LIVE")),
         )
     ).scalar_one_or_none()
     if signal is None:
