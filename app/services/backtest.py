@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import date
 import numpy as np
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from ..config import settings
-from ..models import Signal
-from .repository import load_frames_for_codes
+from ..models import Signal, ScanRun, LiveScanRun, LiveMarketState
+from .repository import load_frames_for_codes, latest_trade_date
 from .execution_engine import (
     ExecutionParams, ExecutedTrade, execute_signals, materialize_next_open_exit,
 )
@@ -61,6 +61,46 @@ def _source_counts(sigs) -> dict:
         v = str(getattr(s, "strategy_version", "") or "UNKNOWN")
         out[v] = out.get(v, 0) + 1
     return out
+
+
+def _freshness_diag(db, signal_end):
+    data_end = latest_trade_date(db)
+    full_scan_end = db.execute(
+        select(func.max(ScanRun.data_date)).where(ScanRun.status == "ok")
+    ).scalar_one_or_none()
+    live_scan_end = db.execute(
+        select(func.max(LiveScanRun.data_date)).where(LiveScanRun.status == "ok")
+    ).scalar_one_or_none()
+    live_state_end = db.execute(
+        select(func.max(LiveMarketState.trade_date)).where(
+            LiveMarketState.strategy_version == settings.strategy_version
+        )
+    ).scalar_one_or_none()
+
+    coverage_candidates = [
+        x for x in (full_scan_end, live_scan_end, live_state_end)
+        if x is not None
+    ]
+    covered_through = max(coverage_candidates) if coverage_candidates else None
+
+    stale = bool(
+        data_end is not None
+        and (covered_through is None or covered_through < data_end)
+    )
+    gap_days = (
+        (data_end - signal_end).days
+        if data_end is not None and signal_end is not None
+        else None
+    )
+    return {
+        "data_end": data_end,
+        "full_scan_end": full_scan_end,
+        "live_scan_end": live_scan_end,
+        "live_state_end": live_state_end,
+        "covered_through": covered_through,
+        "signal_gap_days": gap_days,
+        "signal_history_stale": stale,
+    }
 
 
 def _trade_dict(t: ExecutedTrade) -> dict:
@@ -120,6 +160,7 @@ def dynamic_backtest(
     for k, vals in sorted(reason.items(), key=lambda kv: -len(kv[1])):
         q = perf(vals); q["reason"] = k; reason_rows.append(q)
 
+    signal_end = max((s.signal_date for s in sigs), default=None)
     diagnostics = {
         "input_signals": len(sigs), "executed_objects": len(trades),
         "valid_trades": len(valid), "skipped": len(skipped),
@@ -127,7 +168,8 @@ def dynamic_backtest(
         "execution_errors": execution_errors[:50],
         "source_counts": _source_counts(sigs),
         "signal_start": min((s.signal_date for s in sigs), default=None),
-        "signal_end": max((s.signal_date for s in sigs), default=None),
+        "signal_end": signal_end,
+        **_freshness_diag(db, signal_end),
     }
     return {
         "summary": rows, "trades": [_trade_dict(t) for t in valid],
@@ -198,14 +240,16 @@ def portfolio_backtest(
         rc4_enabled=rc4_enabled,
     )
     result = simulate_portfolio(trades, frames, ep, pp)
+    signal_end = max((s.signal_date for s in sigs), default=None)
     result["diagnostics"] = {
         "input_signals": len(sigs), "execution_objects": len(trades),
         "execution_error_count": len(execution_errors),
         "execution_errors": execution_errors[:50],
         "source_counts": _source_counts(sigs),
         "signal_start": min((s.signal_date for s in sigs), default=None),
-        "signal_end": max((s.signal_date for s in sigs), default=None),
+        "signal_end": signal_end,
         "production_start": settings.bootstrap_start_date,
+        **_freshness_diag(db, signal_end),
     }
     result["monte_carlo"] = (
         monte_carlo_portfolio(trades, frames, ep, pp, min(int(monte_carlo_seeds), 500))
