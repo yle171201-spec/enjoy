@@ -1,1 +1,85 @@
-{% extends "base.html" %}{% block title %}我的持仓{% endblock %}{% block content %}<div class="section-head"><div><h1>我的持仓</h1><p>只跟踪你确认过的真实成交。</p></div></div><div class="metrics"><div><span>当前持仓</span><b>{{data.open_count}}</b></div><div><span>需要处理</span><b>{{data.action_count}}</b></div><div><span>估算市值</span><b>¥{{'%.0f'|format(data.market_value)}}</b></div></div>{% if data.rows %}<div class="signal-grid">{% for r in data.rows %}{% set p=r.position %}<article class="signal-card engine-{{p.engine|lower}}"><div class="signal-top"><div><span class="tag tag-{{p.engine}}">{{p.engine}} · {{'RC4尾仓' if p.stage=='TAIL' else '主仓'}}</span><h3>{{p.code}} {{r.stock.name if r.stock else ''}}</h3></div><b class="{{'neg' if r.action!='HOLD' else 'ok'}}">{{r.action_label}}</b></div><dl><dt>买入</dt><dd>{{p.entry_date}} @ {{'%.2f'|format(p.entry_price)}}</dd><dt>股数</dt><dd>{{p.shares}}</dd><dt>现价</dt><dd>{{'%.2f'|format(r.current_price) if r.current_price is not none else '-'}}</dd><dt>浮盈亏</dt><dd>{{'%+.1f%%'|format(r.pnl*100) if r.pnl is not none else '-'}}</dd><dt>执行</dt><dd>{{r.timing or '继续观察'}}</dd></dl><div class="note">{{r.reason}}</div>{% if r.action=='SELL85_KEEP15' %}<form method="post" action="/positions/{{p.id}}/tail" class="toolbar"><input type="hidden" name="decision_date" value="{{r.decision_date}}"><label>实际卖出价<input name="exit_price" type="number" step="0.01" value="{{r.planned_open or r.current_price or ''}}" required></label><label>剩余股数<input name="remaining_shares" type="number" min="1" max="{{p.shares-1}}" value="{{r.suggested_remaining}}" required></label><button>确认卖85%并进入尾仓</button></form>{% elif r.action=='SELL_ALL' %}<form method="post" action="/positions/{{p.id}}/close" class="toolbar"><input type="hidden" name="reason" value="{{r.reason}}"><label>实际卖出价<input name="exit_price" type="number" step="0.01" value="{{r.planned_open or r.current_price or ''}}" required></label><button class="danger-btn">确认全部卖出</button></form>{% endif %}</article>{% endfor %}</div>{% else %}<div class="empty">暂无真实持仓。</div>{% endif %}{% if closed %}<details class="panel"><summary><b>已结束持仓</b></summary><table><thead><tr><th>股票</th><th>买入</th><th>退出</th><th>原因</th></tr></thead><tbody>{% for p in closed %}<tr><td>{{p.code}}</td><td>{{p.entry_date}} @ {{p.entry_price}}</td><td>{{p.exit_date}} @ {{p.exit_price}}</td><td>{{p.exit_reason}}</td></tr>{% endfor %}</tbody></table></details>{% endif %}{% endblock %}
+{% extends "base.html" %}
+{% block title %}我的持仓{% endblock %}
+{% block content %}
+<div class="section-head">
+  <div>
+    <h1>我的持仓</h1>
+    <p>这里只记录你已经真实买入的股票。系统每天告诉你继续持有还是卖出。</p>
+  </div>
+</div>
+
+<div class="metrics">
+  <div><span>当前持仓</span><b>{{data.open_count}}</b></div>
+  <div><span>需要处理</span><b>{{data.action_count}}</b></div>
+  <div><span>估算市值</span><b>¥{{'%.0f'|format(data.market_value)}}</b></div>
+</div>
+
+{% if data.rows %}
+<div class="signal-grid">
+  {% for r in data.rows %}
+  {% set p=r.position %}
+  <article class="signal-card engine-{{p.engine|lower}}">
+    <div class="signal-top">
+      <div>
+        <span class="tag tag-{{p.engine}}">{{'小尾仓' if p.stage=='TAIL' else '核心持仓'}}</span>
+        <h3>{{p.code}} {{r.stock.name if r.stock else ''}}</h3>
+      </div>
+      <b class="{{'neg' if r.action!='HOLD' else 'ok'}}">{{r.action_label}}</b>
+    </div>
+    <dl>
+      <dt>买入日期</dt><dd>{{p.entry_date}}</dd>
+      <dt>买入价</dt><dd>{{'%.2f'|format(p.entry_price)}}</dd>
+      <dt>现价</dt><dd>{{'%.2f'|format(r.current_price) if r.current_price is not none else '-'}}</dd>
+      <dt>浮盈亏</dt><dd>{{'%+.1f%%'|format(r.pnl*100) if r.pnl is not none else '-'}}</dd>
+      <dt>股数</dt><dd>{{p.shares}}</dd>
+      <dt>保护价</dt><dd>{{'%.2f'|format(p.fail_price)}}</dd>
+      <dt>执行时间</dt><dd>{{r.timing or '继续持有'}}</dd>
+    </dl>
+
+    {% if r.action=='SELL85_KEEP15' %}
+    <div class="note">主仓先兑现，只保留15%小仓位继续观察。</div>
+    <form method="post" action="/positions/{{p.id}}/tail" class="toolbar">
+      <input type="hidden" name="decision_date" value="{{r.decision_date}}">
+      <label>实际卖出价<input name="exit_price" type="number" step="0.01" value="{{r.planned_open or r.current_price or ''}}" required></label>
+      <label>剩余股数<input name="remaining_shares" type="number" min="1" max="{{p.shares-1}}" value="{{r.suggested_remaining}}" required></label>
+      <button>确认卖出85%，保留15%</button>
+    </form>
+    {% elif r.action=='SELL_ALL' %}
+    <div class="note">{{r.reason}}</div>
+    <form method="post" action="/positions/{{p.id}}/close" class="toolbar">
+      <input type="hidden" name="reason" value="{{r.reason}}">
+      <label>实际卖出价<input name="exit_price" type="number" step="0.01" value="{{r.planned_open or r.current_price or ''}}" required></label>
+      <button class="danger-btn">确认全部卖出</button>
+    </form>
+    {% else %}
+    <div class="note">当前没有卖出动作，继续持有即可。</div>
+    {% endif %}
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<div class="empty">
+  <b>当前没有持仓</b>
+  <span>等系统出现新的合格买点再买，不需要为了有仓位而交易。</span>
+</div>
+{% endif %}
+
+{% if closed %}
+<details class="panel">
+  <summary><b>查看已经结束的持仓</b></summary>
+  <table>
+    <thead><tr><th>股票</th><th>买入</th><th>卖出</th><th>系统原因</th></tr></thead>
+    <tbody>
+      {% for p in closed %}
+      <tr>
+        <td>{{p.code}}</td>
+        <td>{{p.entry_date}} @ {{p.entry_price}}</td>
+        <td>{{p.exit_date}} @ {{p.exit_price}}</td>
+        <td>{{p.exit_reason}}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endif %}
+{% endblock %}

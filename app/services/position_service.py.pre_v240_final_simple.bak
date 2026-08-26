@@ -46,11 +46,11 @@ def evaluate_position(db, pos):
             base["reason"]="尾仓缺少原卖出决策日"; return base
         tx = rc4_a_tail_technical_exit(raw, bi)
         if tx.decision_date is None:
-            base.update(action="HOLD",action_label="继续持有",reason="小尾仓趋势仍正常，继续持有")
+            base.update(action="HOLD",action_label="继续持有",reason="15% RC4尾仓：尚未连续3日收盘低于MA30")
             return base
         decision=tx.decision_date.date()
         planned=tx.exit_date.date() if tx.exit_date is not None else None
-        base.update(action="SELL_ALL",action_label="卖出全部尾仓",reason="小尾仓趋势已经转弱",
+        base.update(action="SELL_ALL",action_label="卖出全部尾仓",reason="RC4：连续3日收盘低于MA30",
                     timing=_timing(decision,latest,planned),decision_date=decision,planned_open=tx.exit_open)
         return base
 
@@ -71,8 +71,8 @@ def evaluate_position(db, pos):
     if pos.engine=="A":
         elig=rc4_a_runner_eligibility(float(sig.h_daily or 0), float(mfe), raw, exi)
         if elig.eligible:
-            base.update(action="SELL85_KEEP15",action_label="卖出85% · 保留15%",
-                        reason=f"{reason}；主仓先兑现，保留15%小仓位继续观察",
+            base.update(action="SELL85_KEEP15",action_label="卖85% · 留15%尾仓",
+                        reason=f"{reason}；满足RC4成熟深洗条件",
                         timing=_timing(decision,latest,planned),decision_date=decision,
                         planned_open=planned_open,proof_h=elig.proof_h,ret5=elig.ret5,
                         suggested_remaining=max(1,int(round(pos.shares*.15))))
@@ -93,15 +93,15 @@ def position_dashboard(db):
         tails=sorted([r for r in rows if r["position"].stage=="TAIL" and r["action"]=="HOLD"],
                      key=lambda r:r["pnl"] if r["pnl"] is not None else -999)
         for r in tails[:need]:
-            r.update(action="SELL_ALL",action_label="小尾仓让位 · 全部卖出",
-                     reason="出现新的核心买点，需要腾出仓位，小尾仓优先卖出",timing="下一交易日开盘",decision_date=latest)
+            r.update(action="SELL_ALL",action_label="尾仓让位 · 全部卖出",
+                     reason="新A/B正式买点需要容量，RC4尾仓优先让位",timing="下一交易日开盘",decision_date=latest)
         need-=min(need,len(tails))
         if need>0:
             cs=sorted([r for r in rows if r["position"].engine=="C" and r["action"]=="HOLD"],
                       key=lambda r:r["pnl"] if r["pnl"] is not None else -999)
             for r in cs[:need]:
-                r.update(action="SELL_ALL",action_label="腾出仓位 · 全部卖出",
-                         reason="出现新的核心买点，需要腾出仓位",timing="下一交易日开盘",decision_date=latest)
+                r.update(action="SELL_ALL",action_label="C让位 · 全部卖出",
+                         reason="新A/B正式买点需要容量，C卫星仓让位",timing="下一交易日开盘",decision_date=latest)
     return {"rows":rows,"open_count":len(rows),
             "action_count":sum(r["action"] in {"SELL_ALL","SELL85_KEEP15"} for r in rows),
             "market_value":sum((r["current_price"] or 0)*r["position"].shares for r in rows)}

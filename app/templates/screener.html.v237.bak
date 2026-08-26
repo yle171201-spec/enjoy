@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}N日选股{% endblock %}
+{% block content %}
+<div class="section-head"><div><span class="eyebrow">SCREENER</span><h1>N日买点筛选</h1><p>按交易日而不是自然日，返回每只股票最近一次正式买点。</p></div></div>
+<form class="toolbar" method="get">
+  <label>最近交易日<input name="n" type="number" min="1" max="500" value="{{n}}"></label>
+  <label>发动机<select name="engine">{% for x in ['ALL','A','B','C','A+B','A+C','B+C'] %}<option {% if engine==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label>
+  <button>筛选</button>
+</form>
+<p class="muted">窗口起点约 {{cutoff}} ｜ 数据最新交易日 {{latest_day or '-'}} ｜ 完整V18扫描日 {{full_scan_day or '-'}} ｜ Live扫描日 {{live_scan_day or '-'}}</p>
+<p class="muted">信号源：V18历史 + V18-LIVE每日增量；同日重复时优先 Live。</p>
+<div class="table-wrap">
+<table>
+<thead><tr><th>股票</th><th>最近买点</th><th>距今</th><th>类型</th><th>信号价</th><th>当前价</th><th>至今</th><th>失效价</th><th>预估仓位</th><th>生命周期</th></tr></thead>
+<tbody>
+{% for r in rows %}{% set s=r.signal %}{% set st=r.stock %}
+<tr>
+<td><a href="/stock/{{s.code}}"><b>{{s.code}}</b> {{st.name if st else ''}}</a></td>
+<td>{{s.signal_date}}</td><td>{{r.age if r.age is not none else '-'}}T</td>
+<td><span class="tag tag-{{s.engine}}">{{s.engine}}</span></td>
+<td>{{'%.2f'|format(s.signal_close)}}</td>
+<td>{{'%.2f'|format(r.current_price) if r.current_price is not none else '-'}}</td>
+<td class="{{'pos' if r.since_ret is not none and r.since_ret>0 else 'neg' if r.since_ret is not none else ''}}">{{'%.1f%%'|format(r.since_ret*100) if r.since_ret is not none else '-'}}</td>
+<td>{{'%.2f'|format(s.fail_price)}}</td><td>{{'%.1f%%'|format(s.target_weight*100)}}</td><td>{{r.lifecycle}}</td>
+</tr>
+{% endfor %}
+</tbody></table>
+</div>
+{% if not rows %}<div class="empty">该窗口没有符合条件的正式买点。</div>{% endif %}
+{% endblock %}

@@ -826,12 +826,11 @@ def data_page(request: Request, db=Depends(db_session)):
 @app.post("/admin/smart-update")
 def admin_smart_update(
     background_tasks: BackgroundTasks,
-    return_to: str = Form("data"),
     db=Depends(db_session),
 ):
     if not _data_job_busy(db) and not _scan_job_busy(db) and not _live_scan_busy(db):
         background_tasks.add_task(_bg_smart_update)
-    return RedirectResponse("/" if return_to == "home" else "/data", 303)
+    return RedirectResponse("/data", 303)
 
 
 @app.post("/admin/bootstrap")

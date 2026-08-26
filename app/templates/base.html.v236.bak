@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#07101d">
+  <title>{% block title %}A股ABC{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+  <script src="/static/app.js"></script>
+</head>
+<body>
+<header>
+  <a class="brand" href="/">ABC 日线趋势系统 <small>V2</small></a>
+  <nav>
+    <a href="/">明日候选</a>
+    <a href="/screener">N日选股</a>
+    <a href="/review">历史复盘</a>
+    <a href="/backtest">执行回测</a>
+    <a href="/portfolio">账户回测</a>
+    <a href="/data">数据管理</a>
+    <a href="/validation">策略校验</a>
+    <a href="/logout">退出</a>
+  </nav>
+</header>
+<main>{% block content %}{% endblock %}</main>
+<footer>
+  Production原则：周线仅过滤大趋势；A/B/C结构全部在日线。NEXT_OPEN 是独立执行模型，不能借用 Close-entry 的历史指标。网页用于研究与机械执行辅助。
+</footer>
+</body>
+</html>

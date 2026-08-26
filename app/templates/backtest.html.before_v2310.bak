@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}执行回测{% endblock %}
+{% block content %}
+<div class="section-head"><div><span class="eyebrow">EXECUTION INTEGRITY · {{web_version or 'V2.3.8'}}</span><h1>Close vs 次日开盘动态回测</h1><p>生产信号流 = V18完整历史 + V18-LIVE每日增量。NEXT_OPEN 严格按“收盘确认 → 下一交易日开盘买入/卖出”。</p></div></div>
+<form class="toolbar" method="post">
+<label>发动机<select name="engines">{% for x in ['ABC','AB','AC','BC','A','B','C'] %}<option {% if engines==x %}selected{% endif %}>{{x}}</option>{% endfor %}</select></label>
+<label>开始<input type="date" name="start" min="2025-01-01" value="{{start or '2025-01-01'}}"></label><label>结束<input type="date" name="end" value="{{end or ''}}"></label>
+<label>开盘买入滑点 bps<input type="number" name="slippage_bps" value="{{slippage_bps or 0}}" step="1"></label>
+<label>单边佣金 bps<input type="number" name="commission_bps" value="{{commission_bps or 0}}" step="0.1"></label>
+<label>卖出税费 bps<input type="number" name="stamp_tax_bps" value="{{stamp_tax_bps or 0}}" step="0.1"></label><button>运行对比</button>
+</form>
+{% if result %}{% set d=result.next_open.diagnostics %}
+<div class="note"><b>回测数据体检：</b>输入 {{d.input_signals}} ｜ 有效交易 {{d.valid_trades}} ｜ 跳过 {{d.skipped}} ｜ 执行异常 <span class="{{'neg' if d.execution_error_count else 'ok'}}">{{d.execution_error_count}}</span> ｜ 来源 V18={{d.source_counts.get('V18',0)}} / LIVE={{d.source_counts.get('V18-LIVE',0)}} ｜ {{d.signal_start or '-'}} → {{d.signal_end or '-'}}</div>
+<div class="compare-grid">
+<section class="panel"><span class="eyebrow">SIGNAL CLOSE</span><h2>信号收盘研究口径</h2>{% set x=result.close.summary[0] %}<div class="metric-big"><b>{{'%.1f%%'|format(x.mean*100) if x.N else '-'}}</b><span>平均动态收益</span></div><div class="mini-metrics"><span>胜率 <b>{{'%.1f%%'|format(x.win*100) if x.N else '-'}}</b></span><span>PF <b>{{'%.2f'|format(x.PF) if x.N else '-'}}</b></span><span>盈亏比 <b>{{'%.2f'|format(x.payoff) if x.N else '-'}}</b></span><span>N <b>{{x.N}}</b></span></div></section>
+<section class="panel"><span class="eyebrow">NEXT OPEN</span><h2>真实次开执行口径</h2>{% set x=result.next_open.summary[0] %}<div class="metric-big"><b>{{'%.1f%%'|format(x.mean*100) if x.N else '-'}}</b><span>平均动态收益</span></div><div class="mini-metrics"><span>胜率 <b>{{'%.1f%%'|format(x.win*100) if x.N else '-'}}</b></span><span>PF <b>{{'%.2f'|format(x.PF) if x.N else '-'}}</b></span><span>盈亏比 <b>{{'%.2f'|format(x.payoff) if x.N else '-'}}</b></span><span>N <b>{{x.N}}</b></span></div></section>
+</div>
+<section><h2>分发动机比较</h2><div class="table-wrap"><table><thead><tr><th>范围</th><th>模式</th><th>N</th><th>平均</th><th>中位</th><th>胜率</th><th>PF</th><th>盈亏比</th><th>Q10</th><th>最差</th></tr></thead><tbody>{% for mode,data in [('Close',result.close),('Next Open',result.next_open)] %}{% for x in data.summary %}<tr><td>{{x.scope}}</td><td>{{mode}}</td><td>{{x.N}}</td><td>{{'%.1f%%'|format(x.mean*100) if x.N else '-'}}</td><td>{{'%.1f%%'|format(x.median*100) if x.N else '-'}}</td><td>{{'%.1f%%'|format(x.win*100) if x.N else '-'}}</td><td>{{'%.2f'|format(x.PF) if x.N else '-'}}</td><td>{{'%.2f'|format(x.payoff) if x.N else '-'}}</td><td>{{'%.1f%%'|format(x.q10*100) if x.N else '-'}}</td><td>{{'%.1f%%'|format(x.worst*100) if x.N else '-'}}</td></tr>{% endfor %}{% endfor %}</tbody></table></div></section>
+<section><h2>隔夜缺口分层（Next Open）</h2><div class="table-wrap"><table><thead><tr><th>缺口</th><th>N</th><th>平均</th><th>胜率</th><th>PF</th><th>盈亏比</th><th>MFE</th><th>MAE</th></tr></thead><tbody>{% for x in result.gap_buckets %}<tr><td>{{x.bucket}}</td><td>{{x.N}}</td><td>{{'%.1f%%'|format(x.mean*100)}}</td><td>{{'%.1f%%'|format(x.win*100)}}</td><td>{{'%.2f'|format(x.PF)}}</td><td>{{'%.2f'|format(x.payoff)}}</td><td>{{'%.1f%%'|format(x.mfe_mean*100)}}</td><td>{{'%.1f%%'|format(x.mae_mean*100)}}</td></tr>{% endfor %}</tbody></table></div><p class="muted">缺口仅用于诊断，不新增策略过滤条件。</p></section>
+{% if result.next_open.skip_counts %}<section class="note"><b>Next Open跳过：</b>{{result.next_open.skip_counts}}</section>{% endif %}
+{% if d.execution_error_count %}<details class="panel"><summary><b class="neg">执行异常 {{d.execution_error_count}} 条</b></summary><pre>{{d.execution_errors}}</pre></details>{% endif %}
+{% endif %}
+{% endblock %}

@@ -10,7 +10,7 @@ def _env(name: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class Settings:
-    app_name: str = _env("APP_NAME", "我的交易系统")
+    app_name: str = _env("APP_NAME", "A股ABC在线交易系统")
     app_password: str = _env("APP_PASSWORD", "change-me")
     session_secret: str = _env("SESSION_SECRET", "dev-secret-change-me")
     database_url: str = _env("DATABASE_URL", "sqlite:///./data/abc_strategy.db")
@@ -35,7 +35,7 @@ class Settings:
     calendar_gap_check_days: int = int(_env("CALENDAR_GAP_CHECK_DAYS", "420"))
     default_n_days: int = int(_env("DEFAULT_N_DAYS", "20"))
     slippage_bps: float = float(_env("SLIPPAGE_BPS", "0"))
-    web_version: str = "V2.4-FINAL-SIMPLE"
+    web_version: str = "V2.3.10a-CHART-GUARD"
     strategy_version: str = "V18"
     live_strategy_version: str = "V18-LIVE"
     cookie_secure: bool = _env("COOKIE_SECURE", "0").lower() in {"1","true","yes","on"}

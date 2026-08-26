@@ -1,1 +1,53 @@
-{% extends "base.html" %}{% block title %}下单计算器{% endblock %}{% block content %}<div class="section-head"><div><h1>下单计算器</h1><p>成交后再确认，网页才开始跟踪真实持仓。</p></div></div>{% if signal %}<div class="exec-grid"><div class="panel"><h2>{{signal.code}} {{stock.name if stock else ''}} · {{signal.engine}}买</h2><dl><dt>信号日</dt><dd>{{signal.signal_date}}</dd><dt>执行</dt><dd>下一交易日开盘</dd><dt>风险线</dt><dd>{{'%.2f'|format(signal.fail_price)}}</dd><dt>固定止盈</dt><dd>不设 · 动态退出</dd></dl></div><div class="panel"><form method="post"><input type="hidden" name="signal_id" value="{{signal.id}}"><label>实际成交价<input name="entry_price" type="number" step="0.01" required value="{{entry_price or ''}}"></label><label>账户总资产<input name="account_equity" type="number" step="100" min="0" value="{{account_equity or ''}}"></label><button class="primary">计算最终仓位</button></form>{% if result %}{% if result.skip %}<div class="danger"><b>今天不买</b> {{result.reason}}</div>{% else %}<div class="result"><b>{{'%.1f%%'|format(result.weight*100)}}</b><p>建议 {{result.lot_shares if result.lot_shares is not none else '-'}} 股；金额 {{('¥%.0f'|format(result.lot_amount)) if result.lot_amount is not none else '-'}}</p></div><form method="post" action="/positions/open"><input type="hidden" name="signal_id" value="{{signal.id}}"><input type="hidden" name="entry_price" value="{{result.entry}}"><input type="hidden" name="account_equity" value="{{account_equity or 0}}"><label>实际买入日期<input type="date" name="entry_date" required></label><label>实际成交股数<input type="number" name="shares" min="1" value="{{result.lot_shares or ''}}" required></label><button class="primary">确认已买入 → 加入持仓</button></form>{% endif %}{% endif %}</div></div>{% endif %}{% endblock %}
+{% extends "base.html" %}
+{% block title %}买入计算{% endblock %}
+{% block content %}
+<div class="section-head">
+  <div>
+    <h1>买入计算</h1>
+    <p>开盘后填真实成交价和账户总资产，系统会告诉你最多买多少。成交后再确认加入持仓。</p>
+  </div>
+</div>
+
+{% if signal %}
+<div class="exec-grid">
+  <div class="panel">
+    <span class="tag tag-{{signal.engine}}">核心买点</span>
+    <h2>{{signal.code}} {{stock.name if stock else ''}}</h2>
+    <dl>
+      <dt>信号日</dt><dd>{{signal.signal_date}}</dd>
+      <dt>执行时间</dt><dd>下一交易日开盘</dd>
+      <dt>保护价</dt><dd>{{'%.2f'|format(signal.fail_price)}}</dd>
+      <dt>卖出方式</dt><dd>之后每天由系统判断</dd>
+    </dl>
+  </div>
+
+  <div class="panel">
+    <form method="post">
+      <input type="hidden" name="signal_id" value="{{signal.id}}">
+      <label>实际成交价<input name="entry_price" type="number" step="0.01" required value="{{entry_price or ''}}"></label>
+      <label>账户总资产<input name="account_equity" type="number" step="100" min="0" value="{{account_equity or ''}}"></label>
+      <button class="primary">计算买入数量</button>
+    </form>
+
+    {% if result %}
+      {% if result.skip %}
+      <div class="danger"><b>今天不买</b><span>{{result.reason}}</span></div>
+      {% else %}
+      <div class="result">
+        <b>{{'%.1f%%'|format(result.weight*100)}}</b>
+        <p>建议 {{result.lot_shares if result.lot_shares is not none else '-'}} 股；金额 {{('¥%.0f'|format(result.lot_amount)) if result.lot_amount is not none else '-'}}</p>
+      </div>
+      <form method="post" action="/positions/open">
+        <input type="hidden" name="signal_id" value="{{signal.id}}">
+        <input type="hidden" name="entry_price" value="{{result.entry}}">
+        <input type="hidden" name="account_equity" value="{{account_equity or 0}}">
+        <label>实际买入日期<input type="date" name="entry_date" required></label>
+        <label>实际成交股数<input type="number" name="shares" min="1" value="{{result.lot_shares or ''}}" required></label>
+        <button class="primary">确认已经买入</button>
+      </form>
+      {% endif %}
+    {% endif %}
+  </div>
+</div>
+{% endif %}
+{% endblock %}
