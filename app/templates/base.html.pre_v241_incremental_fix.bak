@@ -16,7 +16,6 @@
     <a href="/">今日操作</a>
     <a href="/positions">我的持仓</a>
     <a href="/screener">历史记录</a>
-    <a href="/portfolio">账户回测</a>
     <a href="/data">数据状态</a>
     <a href="/logout">退出</a>
   </nav>

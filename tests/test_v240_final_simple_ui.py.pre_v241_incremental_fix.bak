@@ -8,7 +8,7 @@ def test_final_daily_navigation_is_simple():
     assert "我的持仓" in base
     assert "历史记录" in base
     assert "数据状态" in base
-    assert "/portfolio" in base
+    assert "/portfolio" not in base
     assert "/review" not in base
     assert "/backtest" not in base
 

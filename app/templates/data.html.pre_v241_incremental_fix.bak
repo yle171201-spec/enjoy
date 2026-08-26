@@ -5,7 +5,7 @@
   <div>
     <span class="eyebrow">PRODUCTION DATA · FROM {{bootstrap_start}}</span>
     <h1>数据中心</h1>
-    <p>正常只点一次。日常优先只更新新增交易日；只有历史覆盖低于正式门槛时才做历史初始化。系统会自动补缺、核验停牌/异常并完成最新日扫描，直到 READY。</p>
+    <p>正常只点一次。系统自动循环完成历史初始化、缺口补齐、停牌/异常审计和最新日扫描，直到 READY。500只只是内部安全批次，不再需要手工续点。</p>
   </div>
   <div class="status">
     <div>数据库最新 <b>{{stats.latest or '暂无'}}</b></div>
@@ -28,7 +28,6 @@
     <div><span>仍未核清</span><b class="{{'warn-text' if stats.latest_unresolved else 'ok'}}">{{'{:,}'.format(stats.latest_unresolved)}}</b></div>
     <div><span>已核验覆盖</span><b>{{'{:.1%}'.format(stats.latest_verified_coverage)}}</b></div>
     <div><span>历史初始化</span><b>{{'{:.1%}'.format(stats.bootstrap_coverage)}}</b></div>
-    <div><span>前一交易日覆盖</span><b>{% if stats.previous_trade_date %}{{stats.previous_trade_date}} · {{'{:.1%}'.format(stats.previous_verified_coverage)}}{% else %}-{% endif %}</b></div>
   </div>
 
   <div class="job-progress" id="smart-progress" style="{{'' if smart.active else 'display:none'}}">
@@ -45,7 +44,7 @@
       {{'系统正在自动处理' if job_busy else '一键更新、补齐、审计并扫描'}}
     </button>
   </form>
-  <p class="muted">正常日更走全市场单次收盘快照 + Latest-only 扫描；只有断档/异常时才进入分批修复，并会自动续跑。</p>
+  <p class="muted">后台仍按小批次运行保护免费Render内存，但会自己继续下一批。</p>
 </section>
 
 <section class="note">

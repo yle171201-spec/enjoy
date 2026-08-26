@@ -146,9 +146,6 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
     )
 
     expected_latest = None
-    previous_trade_date = None
-    previous_strategy_rows = 0
-    previous_verified_coverage = 0.0
     stale = True
     gaps: list[date] = []
     calendar_error = ""
@@ -162,8 +159,6 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
                 date.fromisoformat(settings.bootstrap_start_date),
             )
             expected = set(provider.trade_dates(start, expected_latest))
-            prior_days = [d for d in expected if d < expected_latest]
-            previous_trade_date = max(prior_days) if prior_days else None
             stored = set(db.execute(
                 select(distinct(DailyBar.trade_date)).where(
                     DailyBar.trade_date >= start,
@@ -177,17 +172,6 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
     elif latest is not None:
         expected_latest = latest
         stale = False
-
-    if stale and previous_trade_date is not None and cov["active_nonst"] > 0:
-        previous_audit = _latest_day_audit_stats(
-            db, previous_trade_date, cov["active_nonst"]
-        )
-        previous_strategy_rows = int(
-            previous_audit.get("latest_strategy_rows") or 0
-        )
-        previous_verified_coverage = float(
-            previous_audit.get("latest_verified_coverage") or 0.0
-        )
 
     target_day = expected_latest or latest
     audit = _latest_day_audit_stats(db, target_day, cov["active_nonst"])
@@ -254,9 +238,6 @@ def scan_readiness(db, check_calendar: bool = True) -> dict:
         "strategy_pool": cov["active_nonst"],
         "latest": latest,
         "expected_latest": expected_latest,
-        "previous_trade_date": previous_trade_date,
-        "previous_strategy_rows": previous_strategy_rows,
-        "previous_verified_coverage": previous_verified_coverage,
         "latest_target": target_day,
         "latest_bar_coverage": audit["raw_latest_bar_coverage"],
         "latest_coverage_ok": latest_coverage_ok,

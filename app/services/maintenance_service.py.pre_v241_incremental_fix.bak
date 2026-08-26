@@ -87,7 +87,6 @@ def run_smart_maintenance() -> None:
                 int(stats.get("bootstrap_done") or 0),
                 int(stats.get("bootstrap_errors") or 0),
                 str(stats.get("latest") or ""),
-                int(stats.get("previous_strategy_rows") or 0),
                 int(stats.get("latest_strategy_rows") or 0),
                 int(stats.get("latest_suspended") or 0),
                 int(stats.get("latest_unresolved") or 0),
@@ -100,7 +99,7 @@ def run_smart_maintenance() -> None:
             pool = max(1, int(stats.get("strategy_pool") or 1))
             coverage = float(stats.get("bootstrap_coverage") or 0.0)
 
-            if not bool(stats.get("coverage_ok")):
+            if coverage < 0.9999:
                 _set(
                     stage="历史初始化",
                     percent=min(54.0, 4.0 + 50.0 * coverage),
